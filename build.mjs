@@ -7,6 +7,7 @@ const entries = [
   { in: 'src/core.js', out: 'dist/mini-react.core' },
   { in: 'src/dom.js',  out: 'dist/mini-react.dom'  },
   { in: 'src/data.js', out: 'dist/mini-react.data' },
+  { in: 'src/all.js',  out: 'dist/mini-react'      },
 ];
 
 for (const { in: entry, out } of entries) {
