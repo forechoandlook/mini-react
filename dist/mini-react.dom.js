@@ -3,7 +3,7 @@
 // src/core.js
 var _eff = null;
 var _tracking = null;
-var _batching = false;
+var _batchDepth = 0;
 var _currCleanups = null;
 var _pending = /* @__PURE__ */ new Set();
 var Signal = class {
@@ -22,7 +22,7 @@ var Signal = class {
   set value(v) {
     if (this._eq(v, this._v)) return;
     this._v = v;
-    if (_batching) {
+    if (_batchDepth > 0) {
       for (const f of this._subs) _pending.add(f);
     } else {
       for (const f of [...this._subs]) f();
@@ -88,14 +88,15 @@ var effect = (fn) => {
   };
 };
 var batch = (fn) => {
-  _batching = true;
+  _batchDepth++;
   try {
     fn();
   } finally {
-    _batching = false;
-    const q = [..._pending];
-    _pending.clear();
-    for (const f of q) f();
+    if (--_batchDepth === 0) {
+      const q = [..._pending];
+      _pending.clear();
+      for (const f of q) f();
+    }
   }
 };
 var watch = (sig, cb) => {
@@ -118,26 +119,46 @@ var html = (s) => ({ __trusted: true, value: String(s ?? "") });
 var text = (sig) => ({ __bind: "text", sig, render: (el) => el.textContent = esc(sig.value) });
 var cls = (mapSig) => ({ __bind: "class", sig: mapSig, render: (el) => el.className = Object.entries(mapSig.value).filter(([, v]) => v).map(([k]) => k).join(" ") });
 var attr = (name, sig) => ({ __bind: "attr", name, sig, render: (el) => el.setAttribute(name, sig.value) });
-var mount = (el, component, { escape = true } = {}) => effect(() => {
-  try {
-    const r = typeof component === "function" ? component() : component;
-    if (typeof r === "string") {
-      el.innerHTML = escape ? esc(r) : r;
-    } else if (r?.__trusted) {
-      el.innerHTML = r.value;
-    } else if (r?.__bind) {
-      r.render(el);
-    } else if (r && typeof r === "object") {
-      const s = r.html ?? r.render?.() ?? "";
-      el.innerHTML = escape && !r.__trusted ? esc(s) : s;
-      const cleanup = r.setup?.(el);
-      if (typeof cleanup === "function") return cleanup;
+var mount = (el, component, { escape = true } = {}) => {
+  let _teardown = null;
+  const stop = effect(() => {
+    try {
+      const r = typeof component === "function" ? component() : component;
+      if (typeof r === "string") {
+        el.innerHTML = escape ? esc(r) : r;
+      } else if (r?.__trusted) {
+        el.innerHTML = r.value;
+      } else if (r?.__bind) {
+        r.render(el);
+      } else if (r && typeof r === "object") {
+        const rawHtml = typeof r.html === "function" ? r.html() : r.html ?? r.render?.() ?? "";
+        el.innerHTML = rawHtml;
+        if ((r.setup || r.children) && !_teardown) {
+          const stops = [];
+          if (r.children) {
+            for (const [key, child] of Object.entries(r.children)) {
+              const sel = /^[.#[]/.test(key) ? key : `[data-r="${key}"]`;
+              const slot = el.querySelector(sel);
+              if (slot) stops.push(mount(slot, child));
+            }
+          }
+          if (r.setup) {
+            const cleanup = r.setup(el);
+            if (typeof cleanup === "function") stops.push(cleanup);
+          }
+          _teardown = () => stops.forEach((f) => f?.());
+        }
+      }
+    } catch (e) {
+      console.error("[mount]", e);
+      el.innerHTML = `<div style="color:#f85149">Render error</div>`;
     }
-  } catch (e) {
-    console.error("[mount]", e);
-    el.innerHTML = `<div style="color:#f85149">Render error</div>`;
-  }
-});
+  });
+  return () => {
+    stop();
+    _teardown?.();
+  };
+};
 var show = (cond, yes, no = () => "") => () => cond.value ? yes() : no();
 var bind = (el, sig) => {
   const stop = effect(() => {
@@ -196,17 +217,17 @@ var keyedList = (itemsSig, renderItem, getKey = (i) => i.id ?? i.key, { escape =
       for (const item of items) {
         const key = getKey(item);
         const raw = renderItem(item);
-        const h = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
+        const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
         let el = domMap.get(key);
         if (!el) {
           el = document.createElement("div");
           el.dataset.key = key;
-          el.innerHTML = h;
+          el.innerHTML = h2;
           domMap.set(key, el);
           parentEl.appendChild(el);
           transitions.slideDown(el);
-        } else if (el.innerHTML !== h) {
-          el.innerHTML = h;
+        } else if (el.innerHTML !== h2) {
+          el.innerHTML = h2;
         }
         if (prev) {
           const next = prev.nextSibling;
@@ -295,6 +316,26 @@ var createRouter = (routes) => {
     }
   };
 };
+var h = (strings, ...values) => {
+  let htmlStr = "";
+  const children = {};
+  let idx = 0;
+  strings.forEach((str, i) => {
+    htmlStr += str;
+    if (i < values.length) {
+      const val = values[i];
+      const isComp = val !== null && val !== void 0 && (typeof val === "function" || val?.__isComponent || typeof val === "object" && (val.html != null || val.setup || val.children));
+      if (isComp) {
+        const id = `__s${idx++}`;
+        htmlStr += `<span data-slot="${id}"></span>`;
+        children[`[data-slot="${id}"]`] = val;
+      } else {
+        htmlStr += esc(String(val ?? ""));
+      }
+    }
+  });
+  return Object.keys(children).length ? { html: htmlStr, children } : htmlStr;
+};
 var $ = (id) => document.getElementById(id);
 var $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 var on = (el, evt, fn, opts) => {
@@ -303,7 +344,12 @@ var on = (el, evt, fn, opts) => {
 };
 var once = (el, evt, fn) => on(el, evt, fn, { once: true });
 var nextTick = (fn) => Promise.resolve().then(fn);
-var defineComponent = (fn) => (props = {}) => fn(props);
+var defineComponent = (fn, { name } = {}) => {
+  const component = (props = {}) => fn(props);
+  component.displayName = name ?? fn.name ?? "Component";
+  component.__isComponent = true;
+  return component;
+};
 var debounce = (fn, ms) => {
   let t;
   const d = (...args) => {
@@ -363,6 +409,7 @@ export {
   delegate,
   effect,
   esc,
+  h,
   html,
   keyedList,
   mount,

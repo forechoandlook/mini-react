@@ -6,13 +6,12 @@
 export * from 'https://cdn.jsdelivr.net/gh/forechoandlook/mini-react/dist/mini-react.min.js';
 ```
 
-| 包 | CDN | 含内容 |
+| 包 | CDN | 含内容 | gz |
 |---|---|---|---|
-| core | `mini-react.core.min.js` | 响应式原语 | 
-| dom | `mini-react.dom.min.js` | core + DOM + 工具 | 
-| data | `mini-react.data.min.js` | core + 数据层 + 存储 |
-| all | `mini-react.min.js` | core + DOM + 工具 + 数据层 + 存储 |
-dom 和 data 各自独立，均已内联 core，可单独使用也可同时引入。
+| core | `mini-react.core.min.js` | 响应式原语 | 0.8KB |
+| dom | `mini-react.dom.min.js` | core + DOM + 工具 | 2.9KB |
+| data | `mini-react.data.min.js` | core + 数据层 + 存储 | 2.1KB |
+| all | `mini-react.min.js` | core + DOM + 工具 + 数据层 + 存储 | 4.2KB |
 
 ## mini-react.core
 纯响应式，无 DOM 依赖。
@@ -32,18 +31,23 @@ pos.value = { x: 0, y: 0 } // 不触发
 ```
 ### `computed(fn)` → Signal
 自动追踪 `fn` 内读取的所有 signal，任意依赖变化时重新计算。
+- **立即计算**：创建时同步执行一次
+- **只读**：写入 `.value` 无效
+- **错误处理**：`fn` 抛出异常时打印 `console.error`，保持上一个值
 ```js
 const double = computed(() => count.value * 2)
 double.value // 只读
 ```
 ### `effect(fn)` → dispose()
 `fn` 运行时自动追踪依赖，依赖变化时重新执行。`fn` 可返回清理函数。
+- **立即执行**：创建时同步执行一次
+- **错误处理**：`fn` 抛出异常时打印 `console.error` 并恢复之前的依赖，不影响其他 effect
 ```js
 const stop = effect(() => {
  document.title = `${count.value} items`
  return () => console.log('cleanup')
 })
-stop() // 取消订阅
+stop() // 取消订阅，触发最后一次 cleanup
 ```
 ### `batch(fn)`
 合并 `fn` 内所有 signal 写入为一次更新，性能优化的核心手段。
@@ -78,6 +82,9 @@ HTML 转义，防 XSS。`&`, `<`, `>`, `"` → HTML 实体。
 包含 core 全部导出，另加：
 ### `mount(el, fn, { escape? })` → dispose()
 将 `fn()` 渲染到 `el.innerHTML`，fn 内 signal 变化时自动更新。`escape` 默认 `true`。
+- **`{ html, setup, children }`**：`html` 设置结构（支持响应式函数），`setup(el)` 只执行一次并返回 cleanup，`children` 自动挂载子组件
+- **错误处理**：渲染出错时显示红色错误块，不崩溃整个页面
+- **dispose**：停止响应式追踪并调用 setup cleanup
 ```js
 mount($('app'), () => `<p>${esc(count.value)}</p>`)
 // 原始 HTML
@@ -122,8 +129,17 @@ $('wrap').appendChild(el)
 delegate.on('click', '[data-action="delete"]', (e, el) => remove(el.dataset.id))
 delegate.off('click', '[data-action="delete"]')
 ```
+### `h\`...\`` → string | `{ html, children }`
+组件模板 tagged template。插值是组件（函数/对象）时生成 `<span data-slot>` 占位并收集 `children`，非组件插值自动转义后内联。无子组件时直接返回字符串。详见 [嵌套组件](#嵌套组件)。
+```js
+const App = defineComponent(() => h`
+  <div>${Counter({ label: '+' })} <span>${userName}</span></div>
+`)
+```
+
 ### `createRouter(routes)` → `{ current, route, navigate, match }`
 Hash 模式路由。
+- **路由结果缓存**：每个 path 首次匹配后缓存组件实例，hash 切回时复用
 ```js
 const router = createRouter({
  '/': () => Home(),
@@ -180,8 +196,107 @@ const [res] = createResource(search, q =>
  fetch(`/api/search?q=${q}`).then(r => r.json())
 )
 ```
-### `defineComponent(fn)` → `(props?) => result`
-语义包装，无额外行为。
+### `defineComponent(fn, { name? })` → `(props?) => result`
+定义函数组件，标记 `displayName` 便于调试。支持两种写法：
+
+**字符串组件** — 适合纯展示，可直接插值嵌套：
+```js
+const Badge = defineComponent(({ text, color = 'blue' }) =>
+  `<span class="badge badge-${esc(color)}">${esc(text)}</span>`
+)
+
+const Card = defineComponent(({ title, count }) =>
+  `<div class="card">
+    <h3>${esc(title)}</h3>
+    ${Badge({ text: count })}
+  </div>`
+)
+
+mount($('app'), () => Card({ title: 'Tasks', count: todos.value.length }))
+```
+
+**对象组件** `{ html, setup(el) }` — 适合有交互/副作用的组件：
+- `html` 定义结构，可以是字符串或返回字符串的函数（响应式）
+- `setup(el)` 只执行一次，返回 cleanup 函数
+
+```js
+const Counter = defineComponent(({ label = '+', step = 1 } = {}) => {
+  const n = signal(0)
+  return {
+    html: `<div class="counter">
+      <span data-r="val"></span>
+      <button data-r="btn">${esc(label)}</button>
+    </div>`,
+    setup: el => {
+      const s1 = mount(el.querySelector('[data-r="val"]'), () => String(n.value))
+      const s2 = on(el.querySelector('[data-r="btn"]'), 'click', () => { n.value += step })
+      return () => { s1(); s2() }
+    }
+  }
+})
+```
+
+**嵌套组件** — 用 `h` tagged template，直接把子组件插值进去：
+```js
+const App = defineComponent(() => h`
+  <div class="app">
+    <h1>My App</h1>
+    ${Counter({ label: 'A +1' })}
+    ${Counter({ label: 'B +5', step: 5 })}
+  </div>
+`)
+
+mount($('app'), App())
+```
+
+非组件插值自动 HTML 转义后内联：
+```js
+const name = 'Alice'
+const Card = defineComponent(({ title }) => h`
+  <div>
+    <h2>${title}</h2>
+    <p>hello ${name}</p>
+  </div>
+`)
+```
+
+> **重要：组件结构应保持静态，响应式下推到 signal。**
+>
+> mini-react 没有虚拟 DOM，无法像 React 那样 diff 组件树复用实例。  
+> 若父组件模板读取了 signal，effect 重跑时子组件会被销毁重建。
+>
+> ```js
+> // ❌ 错误：count.value 变化会导致 Counter 重建
+> const App = () => h`<div>${String(count.value)} ${Counter()}</div>`
+>
+> // ✅ 正确：响应式绑定到具体节点，组件结构不变
+> const App = defineComponent(() => h`
+>   <div>
+>     ${Numeric({ sig: count })}
+>     ${Counter()}
+>   </div>
+> `)
+> ```
+>
+> 经验法则：`h` 模板里**不要直接读 `.value`**，把响应式封装进子组件或用 `children` + `mount` 单独挂载。
+
+`children` 和 `setup` 仍可单独使用，适合需要精细控制的场景：
+```js
+defineComponent(() => ({
+  html: `<div><div data-r="c"></div><button id="x">X</button></div>`,
+  children: { c: Counter() },
+  setup: el => on(el.querySelector('#x'), 'click', reset),
+}))
+```
+
+**children / slot** — 字符串组件直接传 HTML 字符串，对象组件在 `setup` 里挂载：
+```js
+// 字符串 slot
+const Panel = defineComponent(({ title, children = '' }) =>
+  `<div class="panel"><h2>${esc(title)}</h2><div class="body">${children}</div></div>`
+)
+mount($('app'), () => Panel({ title: 'Hello', children: Badge({ text: 'new' }) }))
+```
 
 ## mini-react.data
 包含 core 全部导出，另加：

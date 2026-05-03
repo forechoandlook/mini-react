@@ -1,4 +1,17 @@
 {
   "name": "mini-react",
-  "version": "0.1.0"
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/forechoandlook/mini-react.git"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "happy-dom": "^20.9.0"
+  }
 }

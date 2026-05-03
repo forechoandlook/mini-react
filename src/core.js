@@ -1,6 +1,6 @@
 export const version = typeof __VERSION__ !== 'undefined' ? __VERSION__ : 'dev';
 
-let _eff = null, _tracking = null, _batching = false, _currCleanups = null;
+let _eff = null, _tracking = null, _batchDepth = 0, _currCleanups = null;
 const _pending = new Set();
 
 class Signal {
@@ -12,8 +12,8 @@ class Signal {
   set value(v) {
     if (this._eq(v, this._v)) return;
     this._v = v;
-    if (_batching) { for (const f of this._subs) _pending.add(f); }
-    else           { for (const f of [...this._subs]) f(); }
+    if (_batchDepth > 0) { for (const f of this._subs) _pending.add(f); }
+    else                 { for (const f of [...this._subs]) f(); }
   }
   peek() { return this._v; }
 }
@@ -69,11 +69,12 @@ export const effect = fn => {
 };
 
 export const batch = fn => {
-  _batching = true;
+  _batchDepth++;
   try { fn(); } finally {
-    _batching = false;
-    const q = [..._pending]; _pending.clear();
-    for (const f of q) f();
+    if (--_batchDepth === 0) {
+      const q = [..._pending]; _pending.clear();
+      for (const f of q) f();
+    }
   }
 };
 

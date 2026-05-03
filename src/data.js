@@ -60,7 +60,10 @@ export const createFetch = ({ cache = true, ttl = 30_000, retry = 2, retryDelay 
 // ── createStore ───────────────────────────────────────────────────────────────
 export const createStore = (init, { persist } = {}) => {
   const saved = persist && localStorage.getItem(persist);
-  const raw   = saved ? { ...structuredClone(init), ...JSON.parse(saved) } : structuredClone(init);
+  const base  = structuredClone(init);
+  // structuredClone 不保留 Symbol key，手动补回
+  for (const sym of Object.getOwnPropertySymbols(init)) base[sym] = init[sym];
+  const raw   = saved ? { ...base, ...JSON.parse(saved) } : base;
   const sigs  = {};
   const ensure = k => (sigs[k] ??= signal(raw[k]));
   return new Proxy(raw, {

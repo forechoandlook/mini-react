@@ -3,7 +3,7 @@
 // src/core.js
 var _eff = null;
 var _tracking = null;
-var _batching = false;
+var _batchDepth = 0;
 var _currCleanups = null;
 var _pending = /* @__PURE__ */ new Set();
 var Signal = class {
@@ -22,7 +22,7 @@ var Signal = class {
   set value(v) {
     if (this._eq(v, this._v)) return;
     this._v = v;
-    if (_batching) {
+    if (_batchDepth > 0) {
       for (const f of this._subs) _pending.add(f);
     } else {
       for (const f of [...this._subs]) f();
@@ -88,14 +88,15 @@ var effect = (fn) => {
   };
 };
 var batch = (fn) => {
-  _batching = true;
+  _batchDepth++;
   try {
     fn();
   } finally {
-    _batching = false;
-    const q = [..._pending];
-    _pending.clear();
-    for (const f of q) f();
+    if (--_batchDepth === 0) {
+      const q = [..._pending];
+      _pending.clear();
+      for (const f of q) f();
+    }
   }
 };
 var watch = (sig, cb) => {
@@ -188,7 +189,9 @@ var createFetch = ({ cache = true, ttl = 3e4, retry = 2, retryDelay = 1e3, store
 };
 var createStore = (init, { persist } = {}) => {
   const saved = persist && localStorage.getItem(persist);
-  const raw = saved ? { ...structuredClone(init), ...JSON.parse(saved) } : structuredClone(init);
+  const base = structuredClone(init);
+  for (const sym of Object.getOwnPropertySymbols(init)) base[sym] = init[sym];
+  const raw = saved ? { ...base, ...JSON.parse(saved) } : base;
   const sigs = {};
   const ensure = (k) => sigs[k] ??= signal(raw[k]);
   return new Proxy(raw, {

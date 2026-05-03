@@ -7,20 +7,37 @@ export const cls  = mapSig    => ({ __bind:'class', sig: mapSig, render: el => e
 export const attr = (name,sig) => ({ __bind:'attr', name, sig, render: el => el.setAttribute(name, sig.value) });
 
 // ── DOM mount ─────────────────────────────────────────────────────────────────
-export const mount = (el, component, { escape = true } = {}) => effect(() => {
-  try {
-    const r = typeof component === 'function' ? component() : component;
-    if (typeof r === 'string')            { el.innerHTML = escape ? esc(r) : r; }
-    else if (r?.__trusted)               { el.innerHTML = r.value; }
-    else if (r?.__bind)                  { r.render(el); }
-    else if (r && typeof r === 'object') {
-      const s = r.html ?? r.render?.() ?? '';
-      el.innerHTML = escape && !r.__trusted ? esc(s) : s;
-      const cleanup = r.setup?.(el);
-      if (typeof cleanup === 'function') return cleanup;
-    }
-  } catch (e) { console.error('[mount]', e); el.innerHTML = `<div style="color:#f85149">Render error</div>`; }
-});
+export const mount = (el, component, { escape = true } = {}) => {
+  let _teardown = null;
+  const stop = effect(() => {
+    try {
+      const r = typeof component === 'function' ? component() : component;
+      if (typeof r === 'string')            { el.innerHTML = escape ? esc(r) : r; }
+      else if (r?.__trusted)               { el.innerHTML = r.value; }
+      else if (r?.__bind)                  { r.render(el); }
+      else if (r && typeof r === 'object') {
+        const rawHtml = typeof r.html === 'function' ? r.html() : (r.html ?? r.render?.() ?? '');
+        el.innerHTML = rawHtml;
+        if ((r.setup || r.children) && !_teardown) {
+          const stops = [];
+          if (r.children) {
+            for (const [key, child] of Object.entries(r.children)) {
+              const sel = /^[.#[]/.test(key) ? key : `[data-r="${key}"]`;
+              const slot = el.querySelector(sel);
+              if (slot) stops.push(mount(slot, child));
+            }
+          }
+          if (r.setup) {
+            const cleanup = r.setup(el);
+            if (typeof cleanup === 'function') stops.push(cleanup);
+          }
+          _teardown = () => stops.forEach(f => f?.());
+        }
+      }
+    } catch (e) { console.error('[mount]', e); el.innerHTML = `<div style="color:#f85149">Render error</div>`; }
+  });
+  return () => { stop(); _teardown?.(); };
+};
 
 export const show = (cond, yes, no = () => '') => () => cond.value ? yes() : no();
 
@@ -146,13 +163,42 @@ export const createRouter = routes => {
   };
 };
 
+// ── Component template literal ────────────────────────────────────────────────
+export const h = (strings, ...values) => {
+  let htmlStr = '';
+  const children = {};
+  let idx = 0;
+  strings.forEach((str, i) => {
+    htmlStr += str;
+    if (i < values.length) {
+      const val = values[i];
+      const isComp = val !== null && val !== undefined &&
+        (typeof val === 'function' || val?.__isComponent ||
+         (typeof val === 'object' && (val.html != null || val.setup || val.children)));
+      if (isComp) {
+        const id = `__s${idx++}`;
+        htmlStr += `<span data-slot="${id}"></span>`;
+        children[`[data-slot="${id}"]`] = val;
+      } else {
+        htmlStr += esc(String(val ?? ''));
+      }
+    }
+  });
+  return Object.keys(children).length ? { html: htmlStr, children } : htmlStr;
+};
+
 // ── Utils ─────────────────────────────────────────────────────────────────────
 export const $         = id => document.getElementById(id);
 export const $$        = (sel, root = document) => [...root.querySelectorAll(sel)];
 export const on        = (el, evt, fn, opts) => { el.addEventListener(evt, fn, opts); return () => el.removeEventListener(evt, fn, opts); };
 export const once      = (el, evt, fn) => on(el, evt, fn, { once: true });
 export const nextTick  = fn => Promise.resolve().then(fn);
-export const defineComponent = fn => (props = {}) => fn(props);
+export const defineComponent = (fn, { name } = {}) => {
+  const component = (props = {}) => fn(props);
+  component.displayName = name ?? fn.name ?? 'Component';
+  component.__isComponent = true;
+  return component;
+};
 
 export const debounce = (fn, ms) => {
   let t;

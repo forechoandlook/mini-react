@@ -4,7 +4,7 @@
 var version = true ? "0.1.0" : "dev";
 var _eff = null;
 var _tracking = null;
-var _batching = false;
+var _batchDepth = 0;
 var _currCleanups = null;
 var _pending = /* @__PURE__ */ new Set();
 var Signal = class {
@@ -23,7 +23,7 @@ var Signal = class {
   set value(v) {
     if (this._eq(v, this._v)) return;
     this._v = v;
-    if (_batching) {
+    if (_batchDepth > 0) {
       for (const f of this._subs) _pending.add(f);
     } else {
       for (const f of [...this._subs]) f();
@@ -89,14 +89,15 @@ var effect = (fn) => {
   };
 };
 var batch = (fn) => {
-  _batching = true;
+  _batchDepth++;
   try {
     fn();
   } finally {
-    _batching = false;
-    const q = [..._pending];
-    _pending.clear();
-    for (const f of q) f();
+    if (--_batchDepth === 0) {
+      const q = [..._pending];
+      _pending.clear();
+      for (const f of q) f();
+    }
   }
 };
 var watch = (sig, cb) => {

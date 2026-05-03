@@ -1,5 +1,6 @@
 import { build } from 'esbuild';
 import { readFileSync } from 'fs';
+import { gzipSync } from 'zlib';
 
 const { version } = JSON.parse(readFileSync('./package.json', 'utf8'));
 
@@ -35,7 +36,10 @@ for (const { in: entry, out } of entries) {
     banner: { js: banner },
   });
 
-  const size    = (readFileSync(`${out}.js`).length / 1024).toFixed(1);
-  const sizeMin = (readFileSync(`${out}.min.js`).length / 1024).toFixed(1);
-  console.log(`${name.padEnd(10)} v${version}  ${size}KB → ${sizeMin}KB (min)`);
+  const raw     = readFileSync(`${out}.js`);
+  const min     = readFileSync(`${out}.min.js`);
+  const size    = (raw.length / 1024).toFixed(1);
+  const sizeMin = (min.length / 1024).toFixed(1);
+  const sizeGz  = (gzipSync(min, { level: 9 }).length / 1024).toFixed(1);
+  console.log(`${name.padEnd(10)} v${version}  ${size}KB → ${sizeMin}KB (min) → ${sizeGz}KB (gz)`);
 }
