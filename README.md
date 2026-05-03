@@ -11,6 +11,7 @@ export * from 'https://cdn.jsdelivr.net/gh/forechoandlook/mini-react/dist/mini-r
 | core | `mini-react.core.min.js` | 响应式原语 | 
 | dom | `mini-react.dom.min.js` | core + DOM + 工具 | 
 | data | `mini-react.data.min.js` | core + 数据层 + 存储 |
+| all | `mini-react.min.js` | core + DOM + 工具 + 数据层 + 存储 |
 dom 和 data 各自独立，均已内联 core，可单独使用也可同时引入。
 
 ## mini-react.core
