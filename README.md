@@ -1,7 +1,10 @@
 # mini-react
 轻量响应式框架，无构建依赖，纯 ES Module。三个独立包，按需引入。
 ## CDN 引入
-`https://cdn.jsdelivr.net/gh/forechoandlook/mini-react@v0.1.0/dist/mini-react.core.min.js`
+```js
+// lib.js
+export * from 'https://cdn.jsdelivr.net/gh/forechoandlook/mini-react/dist/mini-react.min.js';
+```
 
 | 包 | CDN | 含内容 |
 |---|---|---|---|
