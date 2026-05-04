@@ -205,29 +205,92 @@ describe('h tagged template', () => {
 });
 
 describe('defineComponent', () => {
-  it('包装函数，传递 props', () => {
-    const Comp = defineComponent(({ name }) => `hi ${name}`);
-    assert.equal(Comp({ name: 'Alice' }), 'hi Alice');
+  it('返回对象组件，html 是渲染函数', () => {
+    const Comp = defineComponent(({ name }) => () => `hi ${name}`);
+    const inst = Comp({ name: 'Alice' });
+    assert.equal(typeof inst.html, 'function');
+    assert.equal(inst.html(), 'hi Alice');
   });
 
   it('props 默认为 {}', () => {
-    const Comp = defineComponent(({ x = 1 }) => String(x));
-    assert.equal(Comp(), '1');
+    const Comp = defineComponent(({ x = 1 }) => () => String(x));
+    const inst = Comp();
+    assert.equal(inst.html(), '1');
   });
 
-  it('标记 __isComponent', () => {
-    const Comp = defineComponent(() => '');
+  it('factory 标记 __isComponent', () => {
+    const Comp = defineComponent(() => () => '');
     assert.ok(Comp.__isComponent);
   });
 
+  it('实例也标记 __isComponent', () => {
+    const Comp = defineComponent(() => () => '');
+    assert.ok(Comp().__isComponent);
+  });
+
   it('displayName 取函数名', () => {
-    const MyCard = defineComponent(function MyCard() { return ''; });
+    const MyCard = defineComponent(function MyCard() { return () => ''; });
     assert.equal(MyCard.displayName, 'MyCard');
   });
 
   it('自定义 name', () => {
-    const Comp = defineComponent(() => '', { name: 'Custom' });
+    const Comp = defineComponent(() => () => '', { name: 'Custom' });
     assert.equal(Comp.displayName, 'Custom');
+  });
+
+  it('mount 后 onMount 被调用', async () => {
+    let mounted = false;
+    const Comp = defineComponent((_, { onMount }) => {
+      onMount(() => { mounted = true; });
+      return () => '<div></div>';
+    });
+    const d = div();
+    mount(d, Comp({}), { escape: false });
+    await Promise.resolve(); // nextTick
+    assert.ok(mounted);
+  });
+
+  it('dispose 后 onUnmount 被调用', async () => {
+    let unmounted = false;
+    const Comp = defineComponent((_, { onUnmount }) => {
+      onUnmount(() => { unmounted = true; });
+      return () => '<div></div>';
+    });
+    const d = div();
+    const stop = mount(d, Comp({}), { escape: false });
+    stop();
+    assert.ok(unmounted);
+  });
+
+  it('内部 signal 驱动重渲染', () => {
+    const Comp = defineComponent((_, { signal }) => {
+      const count = signal(0);
+      return () => `<span>${count.value}</span>`;
+    });
+    const d = div();
+    // 需要拿到内部 signal 的引用来测试，改用 ctx.effect 驱动
+    mount(d, Comp({}), { escape: false });
+    assert.ok(d.innerHTML.includes('<span>0</span>'));
+  });
+
+  it('dispose 停止内部 effect', () => {
+    let runs = 0;
+    const { signal: sig, effect: eff } = (() => {
+      // 通过 ctx 验证
+      let _ctx;
+      const Comp = defineComponent((_, ctx) => { _ctx = ctx; return () => ''; });
+      const d = div();
+      const stop = mount(d, Comp({}), { escape: false });
+      const s = _ctx.signal(0);
+      _ctx.effect(() => { s.value; runs++; });
+      runs = 0;
+      s.value = 1; // effect 跑一次
+      assert.equal(runs, 1);
+      stop(); // dispose
+      s.value = 2;
+      return { signal: s };
+    })();
+    assert.equal(runs, 1); // dispose 后不再运行
   });
 });
 

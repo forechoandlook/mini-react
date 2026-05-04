@@ -1,45 +1,58 @@
 export { signal, computed, effect, batch, watch, onCleanup, esc, html } from './core.js';
-import { signal, effect, esc } from './core.js';
+import { signal, computed, effect, esc } from './core.js';
 
 // ── Bind descriptors ──────────────────────────────────────────────────────────
-export const text = sig       => ({ __bind:'text',  sig, render: el => el.textContent = esc(sig.value) });
-export const cls  = mapSig    => ({ __bind:'class', sig: mapSig, render: el => el.className = Object.entries(mapSig.value).filter(([,v])=>v).map(([k])=>k).join(' ') });
-export const attr = (name,sig) => ({ __bind:'attr', name, sig, render: el => el.setAttribute(name, sig.value) });
+export const text = sig        => ({ __bind:'text',  sig, render: el => el.textContent = esc(sig.value) });
+export const cls  = mapSig     => ({ __bind:'class', sig: mapSig, render: el => el.className = Object.entries(mapSig.value).filter(([,v])=>v).map(([k])=>k).join(' ') });
+export const attr = (name,sig) => ({ __bind:'attr',  name, sig, render: el => el.setAttribute(name, sig.value) });
 
 // ── DOM mount ─────────────────────────────────────────────────────────────────
 export const mount = (el, component, { escape = true } = {}) => {
-  let _teardown = null;
+  let _setupRan = false, _setupCleanup = null, _childrenStop = null;
+
   const stop = effect(() => {
     try {
+      // Stop children from previous render before replacing innerHTML
+      _childrenStop?.();
+      _childrenStop = null;
+
       const r = typeof component === 'function' ? component() : component;
-      if (typeof r === 'string')            { el.innerHTML = escape ? esc(r) : r; }
-      else if (r?.__trusted)               { el.innerHTML = r.value; }
-      else if (r?.__bind)                  { r.render(el); }
+      if (typeof r === 'string')           { el.innerHTML = escape ? esc(r) : r; }
+      else if (r?.__trusted)              { el.innerHTML = r.value; }
+      else if (r?.__bind)                 { r.render(el); }
       else if (r && typeof r === 'object') {
         const rawHtml = typeof r.html === 'function' ? r.html() : (r.html ?? r.render?.() ?? '');
         el.innerHTML = rawHtml;
-        if ((r.setup || r.children) && !_teardown) {
-          const stops = [];
-          if (r.children) {
-            for (const [key, child] of Object.entries(r.children)) {
-              const sel = /^[.#[]/.test(key) ? key : `[data-r="${key}"]`;
-              const slot = el.querySelector(sel);
-              if (slot) stops.push(mount(slot, child));
-            }
+
+        // Setup runs once only
+        if (r.setup && !_setupRan) {
+          _setupRan = true;
+          const cleanup = r.setup(el);
+          if (typeof cleanup === 'function') _setupCleanup = cleanup;
+        }
+
+        // Children re-mount on every render into fresh DOM
+        if (r.children) {
+          const childStops = [];
+          for (const [key, child] of Object.entries(r.children)) {
+            const sel = /^[.#[]/.test(key) ? key : `[data-r="${key}"]`;
+            const slot = el.querySelector(sel);
+            if (slot) childStops.push(mount(slot, child));
           }
-          if (r.setup) {
-            const cleanup = r.setup(el);
-            if (typeof cleanup === 'function') stops.push(cleanup);
-          }
-          _teardown = () => stops.forEach(f => f?.());
+          _childrenStop = () => childStops.forEach(f => f?.());
         }
       }
     } catch (e) { console.error('[mount]', e); el.innerHTML = `<div style="color:#f85149">Render error</div>`; }
   });
-  return () => { stop(); _teardown?.(); };
+
+  return () => { stop(); _setupCleanup?.(); _childrenStop?.(); };
 };
 
-export const show = (cond, yes, no = () => '') => () => cond.value ? yes() : no();
+export const show = (cond, yes, no = '') => () => {
+  const v = cond && typeof cond === 'object' && 'value' in cond ? cond.value : cond;
+  const branch = v ? yes : no;
+  return typeof branch === 'function' ? branch() : branch;
+};
 
 // ── Two-way bind ──────────────────────────────────────────────────────────────
 export const bind = (el, sig) => {
@@ -60,8 +73,15 @@ export const delegate = (() => {
     }, { capture: true });
   };
   return {
-    on:  (evt, sel, fn) => { ensure(evt); reg.get(evt).push([sel, fn]); },
-    off: (evt, sel)     => { if (reg.has(evt)) reg.set(evt, reg.get(evt).filter(([s]) => s !== sel)); },
+    // Returns an unlisten function for handler-level deregistration
+    on: (evt, sel, fn) => {
+      ensure(evt);
+      const entry = [sel, fn];
+      reg.get(evt).push(entry);
+      return () => reg.set(evt, reg.get(evt).filter(e => e !== entry));
+    },
+    // Removes all handlers for a selector (kept for compat)
+    off: (evt, sel) => { if (reg.has(evt)) reg.set(evt, reg.get(evt).filter(([s]) => s !== sel)); },
   };
 })();
 
@@ -74,7 +94,8 @@ export const transitions = {
 };
 
 // ── Keyed list ────────────────────────────────────────────────────────────────
-export const keyedList = (itemsSig, renderItem, getKey = i => i.id ?? i.key, { escape = true } = {}) => {
+// tag option lets callers control the wrapper element type (e.g. 'li' for <ul>)
+export const keyedList = (itemsSig, renderItem, getKey = i => i.id ?? i.key, { escape = true, tag = 'div' } = {}) => {
   const domMap = new Map();
   return parentEl => effect(() => {
     try {
@@ -93,7 +114,7 @@ export const keyedList = (itemsSig, renderItem, getKey = i => i.id ?? i.key, { e
         const h   = escape && typeof raw === 'string' && !raw?.__trusted ? esc(raw) : (raw?.value ?? raw);
         let el = domMap.get(key);
         if (!el) {
-          el = document.createElement('div');
+          el = document.createElement(tag);
           el.dataset.key = key; el.innerHTML = h;
           domMap.set(key, el); parentEl.appendChild(el);
           transitions.slideDown(el);
@@ -134,23 +155,30 @@ export const virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5,
     inner.style.height = `${items.length * itemHeight}px`;
   };
   wrap.addEventListener('scroll', update, { passive: true });
-  effect(() => { itemsSig.value; update(); });
-  return { el: wrap, dispose: () => rendered.clear() };
+  // Fix: capture stopEffect so dispose can fully clean up
+  const stopEffect = effect(() => { itemsSig.value; update(); });
+  return {
+    el: wrap,
+    dispose: () => { rendered.clear(); wrap.removeEventListener('scroll', update); stopEffect(); },
+  };
 };
 
 // ── Router ────────────────────────────────────────────────────────────────────
 export const createRouter = routes => {
   const current = signal(location.hash.slice(1) || '/');
-  const cache   = new Map();
   window.addEventListener('hashchange', () => { current.value = location.hash.slice(1) || '/'; });
   const route = (() => {
-    const s = signal(undefined), deps = new Set();
+    const s = signal(undefined);
     const run = () => {
       const path = current.value;
-      if (cache.has(path)) { s.value = cache.get(path); return; }
+      // Fix: support :param routes; removed stale cache that broke reactive components
       for (const [pat, comp] of Object.entries(routes)) {
-        if (pat === path || pat === '*') { const r = typeof comp === 'function' ? comp() : comp; cache.set(path, r); s.value = r; return; }
+        if (pat === '*') continue;
+        const regex = new RegExp('^' + pat.replace(/:\w+/g, '([^/]+)') + '$');
+        const m = path.match(regex);
+        if (m) { s.value = typeof comp === 'function' ? comp(...m.slice(1)) : comp; return; }
       }
+      if (routes['*']) { const c = routes['*']; s.value = typeof c === 'function' ? c() : c; return; }
       s.value = null;
     };
     effect(run);
@@ -193,11 +221,35 @@ export const $$        = (sel, root = document) => [...root.querySelectorAll(sel
 export const on        = (el, evt, fn, opts) => { el.addEventListener(evt, fn, opts); return () => el.removeEventListener(evt, fn, opts); };
 export const once      = (el, evt, fn) => on(el, evt, fn, { once: true });
 export const nextTick  = fn => Promise.resolve().then(fn);
-export const defineComponent = (fn, { name } = {}) => {
-  const component = (props = {}) => fn(props);
-  component.displayName = name ?? fn.name ?? 'Component';
-  component.__isComponent = true;
-  return component;
+
+// ── defineComponent ───────────────────────────────────────────────────────────
+// For stateful components with private signals, effects, and lifecycle hooks.
+// setup(props, ctx) runs once; return a render function () => htmlString.
+// All ctx.effect and ctx.asyncEffect are automatically stopped on unmount.
+export const defineComponent = (setup, { name } = {}) => {
+  const factory = (props = {}) => {
+    const stops = [], mountCbs = [], unmountCbs = [];
+    const ctx = {
+      signal:      (v, opts) => signal(v, opts),
+      computed:    fn        => computed(fn),
+      effect:      fn        => { const s = effect(fn); stops.push(s); return s; },
+      asyncEffect: fn        => { const s = effect(() => { const ctrl = new AbortController(); Promise.resolve(fn(ctrl.signal)).catch(e => { if (e?.name !== 'AbortError') console.error('[asyncEffect]', e); }); return () => ctrl.abort(); }); stops.push(s); return s; },
+      onMount:     fn        => mountCbs.push(fn),
+      onUnmount:   fn        => unmountCbs.push(fn),
+    };
+    const renderFn = setup(props, ctx);
+    return {
+      __isComponent: true,
+      html: typeof renderFn === 'function' ? renderFn : () => String(renderFn ?? ''),
+      setup: el => {
+        nextTick(() => mountCbs.forEach(fn => fn(el)));
+        return () => { unmountCbs.forEach(fn => fn()); stops.forEach(s => s()); };
+      },
+    };
+  };
+  factory.displayName = name ?? setup.name ?? 'Component';
+  factory.__isComponent = true;
+  return factory;
 };
 
 export const debounce = (fn, ms) => {

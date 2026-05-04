@@ -13,7 +13,7 @@ const entries = [
 
 for (const { in: entry, out } of entries) {
   const name   = entry.replace('src/', '').replace('.js', '');
-  const banner = `/* mini-react/${name} v${version} | https://github.com/forechoandlook/webui */`;
+  const banner = `/* mini-react/${name} v${version} | https://github.com/forechoandlook/mini-react */`;
 
   await build({
     entryPoints: [entry],

@@ -22,12 +22,32 @@ describe('show — 边界情况', () => {
     assert.equal(d.innerHTML, '');
   });
 
-  it('传入普通 boolean（非 signal）— 静默失效，始终走 no 分支', () => {
-    // cond.value 在非 signal 时是 undefined（falsy）
-    // 这是已知限制：show 的第一个参数必须是 signal
+  it('传入普通 boolean true — 正确走 yes 分支', () => {
     const d = div();
-    mount(d, show(true, () => 'yes', () => 'no'));
-    assert.equal(d.innerHTML, 'no'); // true.value === undefined → 走 no
+    mount(d, show(true, 'yes', 'no'));
+    assert.equal(d.innerHTML, 'yes');
+  });
+
+  it('传入普通 boolean false — 走 no 分支', () => {
+    const d = div();
+    mount(d, show(false, 'yes', 'no'));
+    assert.equal(d.innerHTML, 'no');
+  });
+
+  it('分支可以是字符串，不必包函数', () => {
+    const flag = signal(true);
+    const d = div();
+    mount(d, show(flag, 'yes', 'no'));
+    assert.equal(d.innerHTML, 'yes');
+    flag.value = false;
+    assert.equal(d.innerHTML, 'no');
+  });
+
+  it('分支可以是函数', () => {
+    const flag = signal(true);
+    const d = div();
+    mount(d, show(flag, () => 'yes', () => 'no'));
+    assert.equal(d.innerHTML, 'yes');
   });
 
   it('signal 切换多次保持正确', () => {

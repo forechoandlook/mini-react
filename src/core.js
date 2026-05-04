@@ -78,15 +78,27 @@ export const batch = fn => {
   }
 };
 
+// Fix: use mounted flag instead of v !== old to respect signal's own equality
 export const watch = (sig, cb) => {
-  let old = sig.peek();
+  let old = sig.peek(), mounted = false;
   return effect(() => {
     const v = sig.value;
-    if (v !== old) { cb(v, old); old = v; }
+    if (mounted) { cb(v, old); }
+    mounted = true;
+    old = v;
   });
 };
 
 export const onCleanup = fn => { if (_currCleanups) _currCleanups.push(fn); };
+
+// Fix: catch async errors so rejections aren't silently swallowed
+export const asyncEffect = fn => effect(() => {
+  const ctrl = new AbortController();
+  Promise.resolve(fn(ctrl.signal)).catch(e => {
+    if (e?.name !== 'AbortError') console.error('[asyncEffect]', e);
+  });
+  return () => ctrl.abort();
+});
 
 export const esc  = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 export const html = s => ({ __trusted: true, value: String(s ?? '') });

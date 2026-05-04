@@ -1,7 +1,7 @@
-/* mini-react/core v0.1.0 | https://github.com/forechoandlook/webui */
+/* mini-react/core v0.1.3 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
-var version = true ? "0.1.0" : "dev";
+var version = true ? "0.1.3" : "dev";
 var _eff = null;
 var _tracking = null;
 var _batchDepth = 0;
@@ -101,21 +101,30 @@ var batch = (fn) => {
   }
 };
 var watch = (sig, cb) => {
-  let old = sig.peek();
+  let old = sig.peek(), mounted = false;
   return effect(() => {
     const v = sig.value;
-    if (v !== old) {
+    if (mounted) {
       cb(v, old);
-      old = v;
     }
+    mounted = true;
+    old = v;
   });
 };
 var onCleanup = (fn) => {
   if (_currCleanups) _currCleanups.push(fn);
 };
+var asyncEffect = (fn) => effect(() => {
+  const ctrl = new AbortController();
+  Promise.resolve(fn(ctrl.signal)).catch((e) => {
+    if (e?.name !== "AbortError") console.error("[asyncEffect]", e);
+  });
+  return () => ctrl.abort();
+});
 var esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 var html = (s) => ({ __trusted: true, value: String(s ?? "") });
 export {
+  asyncEffect,
   batch,
   computed,
   effect,

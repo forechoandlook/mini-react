@@ -249,15 +249,15 @@ describe('createRouter', () => {
     assert.equal(typeof router.route.value, 'string'); // '404'
   });
 
-  it('同一路径第二次命中缓存', () => {
+  it('同一路径导航两次，factory 被调用两次（无缓存，响应式组件不过期）', () => {
     let calls = 0;
     const router = createRouter({
       '/p': () => { calls++; return 'page'; },
     });
     router.current.value = '/p';
     router.current.value = '/other-unknown';
-    router.current.value = '/p'; // 回到 /p，命中缓存
-    assert.equal(calls, 1);
+    router.current.value = '/p';
+    assert.equal(calls, 2);
   });
 });
 

@@ -1,4 +1,4 @@
-/* mini-react/data v0.1.0 | https://github.com/forechoandlook/webui */
+/* mini-react/data v0.1.3 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
 var _eff = null;
@@ -100,13 +100,14 @@ var batch = (fn) => {
   }
 };
 var watch = (sig, cb) => {
-  let old = sig.peek();
+  let old = sig.peek(), mounted = false;
   return effect(() => {
     const v = sig.value;
-    if (v !== old) {
+    if (mounted) {
       cb(v, old);
-      old = v;
     }
+    mounted = true;
+    old = v;
   });
 };
 var onCleanup = (fn) => {
@@ -162,7 +163,7 @@ var createFetch = ({ cache = true, ttl = 3e4, retry = 2, retryDelay = 1e3, store
     const hit = _mem.get(key);
     return hit && Date.now() - hit.ts < ttl ? hit.data : void 0;
   };
-  const cacheSet = (key, data, t) => {
+  const cacheSet = async (key, data, t) => {
     if (store) return store.set(key, data, { ttl: t });
     _mem.set(key, { data, ts: Date.now() });
   };
@@ -172,8 +173,8 @@ var createFetch = ({ cache = true, ttl = 3e4, retry = 2, retryDelay = 1e3, store
       const hit = await cacheGet(key);
       if (hit !== void 0) return hit;
     }
-    const attempt = (n, delay) => Promise.resolve(fetcher()).then((data) => {
-      if (cache) cacheSet(key, data, t);
+    const attempt = (n, delay) => Promise.resolve(fetcher()).then(async (data) => {
+      if (cache) await cacheSet(key, data, t);
       return data;
     }).catch((e) => {
       if (n > 0 && e?.name !== "AbortError") return new Promise((r) => setTimeout(r, delay)).then(() => attempt(n - 1, delay * 2));
@@ -194,6 +195,16 @@ var createStore = (init, { persist } = {}) => {
   const raw = saved ? { ...base, ...JSON.parse(saved) } : base;
   const sigs = {};
   const ensure = (k) => sigs[k] ??= signal(raw[k]);
+  let _persistPending = false;
+  const schedulePersist = () => {
+    if (!_persistPending) {
+      _persistPending = true;
+      Promise.resolve().then(() => {
+        localStorage.setItem(persist, JSON.stringify(raw));
+        _persistPending = false;
+      });
+    }
+  };
   return new Proxy(raw, {
     get(_, k) {
       return typeof k === "symbol" ? raw[k] : ensure(k).value;
@@ -201,7 +212,7 @@ var createStore = (init, { persist } = {}) => {
     set(_, k, v) {
       raw[k] = v;
       ensure(k).value = v;
-      if (persist) localStorage.setItem(persist, JSON.stringify(raw));
+      if (persist) schedulePersist();
       return true;
     }
   });
@@ -233,14 +244,7 @@ var ls = {
     try {
       localStorage.setItem(key, gz ? await _compress(str) : str);
     } catch (e) {
-      if (e?.name === "QuotaExceededError") {
-        const keys = Object.keys(localStorage);
-        if (keys.length) localStorage.removeItem(keys[0]);
-        try {
-          localStorage.setItem(key, gz ? await _compress(str) : str);
-        } catch {
-        }
-      }
+      if (e?.name === "QuotaExceededError") console.warn("[ls] storage full, write skipped:", key);
     }
   },
   remove: (key) => localStorage.removeItem(key),

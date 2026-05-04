@@ -27,7 +27,8 @@ export const createFetch = ({ cache = true, ttl = 30_000, retry = 2, retryDelay 
     const hit = _mem.get(key);
     return hit && Date.now() - hit.ts < ttl ? hit.data : undefined;
   };
-  const cacheSet = (key, data, t) => {
+  // Fix: await store.set so async stores aren't fire-and-forget
+  const cacheSet = async (key, data, t) => {
     if (store) return store.set(key, data, { ttl: t });
     _mem.set(key, { data, ts: Date.now() });
   };
@@ -39,8 +40,8 @@ export const createFetch = ({ cache = true, ttl = 30_000, retry = 2, retryDelay 
       if (hit !== undefined) return hit;
     }
     const attempt = (n, delay) =>
-      Promise.resolve(fetcher()).then(data => {
-        if (cache) cacheSet(key, data, t);
+      Promise.resolve(fetcher()).then(async data => {
+        if (cache) await cacheSet(key, data, t);
         return data;
       }).catch(e => {
         if (n > 0 && e?.name !== 'AbortError') return new Promise(r => setTimeout(r, delay)).then(() => attempt(n - 1, delay * 2));
@@ -61,16 +62,28 @@ export const createFetch = ({ cache = true, ttl = 30_000, retry = 2, retryDelay 
 export const createStore = (init, { persist } = {}) => {
   const saved = persist && localStorage.getItem(persist);
   const base  = structuredClone(init);
-  // structuredClone 不保留 Symbol key，手动补回
+  // structuredClone drops Symbol keys; restore them manually
   for (const sym of Object.getOwnPropertySymbols(init)) base[sym] = init[sym];
   const raw   = saved ? { ...base, ...JSON.parse(saved) } : base;
   const sigs  = {};
   const ensure = k => (sigs[k] ??= signal(raw[k]));
+  // Debounce persist writes via microtask to avoid O(n*m) serialization on batched writes
+  let _persistPending = false;
+  const schedulePersist = () => {
+    if (!_persistPending) {
+      _persistPending = true;
+      Promise.resolve().then(() => {
+        // Exclude Symbol keys (JSON.stringify ignores them anyway)
+        localStorage.setItem(persist, JSON.stringify(raw));
+        _persistPending = false;
+      });
+    }
+  };
   return new Proxy(raw, {
     get(_, k) { return typeof k === 'symbol' ? raw[k] : ensure(k).value; },
     set(_, k, v) {
       raw[k] = v; ensure(k).value = v;
-      if (persist) localStorage.setItem(persist, JSON.stringify(raw));
+      if (persist) schedulePersist();
       return true;
     },
   });
@@ -100,11 +113,8 @@ export const ls = {
     try {
       localStorage.setItem(key, gz ? await _compress(str) : str);
     } catch (e) {
-      if (e?.name === 'QuotaExceededError') {
-        const keys = Object.keys(localStorage);
-        if (keys.length) localStorage.removeItem(keys[0]);
-        try { localStorage.setItem(key, gz ? await _compress(str) : str); } catch {}
-      }
+      // Fix: removed random key eviction — caller decides what to evict on QuotaExceededError
+      if (e?.name === 'QuotaExceededError') console.warn('[ls] storage full, write skipped:', key);
     }
   },
   remove: key => localStorage.removeItem(key),

@@ -71,15 +71,17 @@ describe('createStore — 基础响应式', () => {
 });
 
 describe('createStore — persist', () => {
-  it('写入时同步到 localStorage', () => {
+  it('写入时异步（microtask）持久化到 localStorage', async () => {
     localStorage.clear();
     const s = createStore({ theme: 'light' }, { persist: 'prefs' });
     s.theme = 'dark';
+    // persist is debounced via microtask to batch multiple writes
+    await Promise.resolve();
     const stored = JSON.parse(localStorage.getItem('prefs'));
     assert.equal(stored.theme, 'dark');
   });
 
-  it('初始化时从 localStorage 恢复', () => {
+  it('初始化时从 localStorage 恢复（同步）', () => {
     localStorage.setItem('prefs2', JSON.stringify({ theme: 'dark' }));
     const s = createStore({ theme: 'light', lang: 'zh' }, { persist: 'prefs2' });
     assert.equal(s.theme, 'dark'); // 从 localStorage 恢复

@@ -1,4 +1,4 @@
-/* mini-react/dom v0.1.0 | https://github.com/forechoandlook/webui */
+/* mini-react/dom v0.1.3 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
 var _eff = null;
@@ -100,13 +100,14 @@ var batch = (fn) => {
   }
 };
 var watch = (sig, cb) => {
-  let old = sig.peek();
+  let old = sig.peek(), mounted = false;
   return effect(() => {
     const v = sig.value;
-    if (v !== old) {
+    if (mounted) {
       cb(v, old);
-      old = v;
     }
+    mounted = true;
+    old = v;
   });
 };
 var onCleanup = (fn) => {
@@ -120,9 +121,11 @@ var text = (sig) => ({ __bind: "text", sig, render: (el) => el.textContent = esc
 var cls = (mapSig) => ({ __bind: "class", sig: mapSig, render: (el) => el.className = Object.entries(mapSig.value).filter(([, v]) => v).map(([k]) => k).join(" ") });
 var attr = (name, sig) => ({ __bind: "attr", name, sig, render: (el) => el.setAttribute(name, sig.value) });
 var mount = (el, component, { escape = true } = {}) => {
-  let _teardown = null;
+  let _setupRan = false, _setupCleanup = null, _childrenStop = null;
   const stop = effect(() => {
     try {
+      _childrenStop?.();
+      _childrenStop = null;
       const r = typeof component === "function" ? component() : component;
       if (typeof r === "string") {
         el.innerHTML = escape ? esc(r) : r;
@@ -133,20 +136,19 @@ var mount = (el, component, { escape = true } = {}) => {
       } else if (r && typeof r === "object") {
         const rawHtml = typeof r.html === "function" ? r.html() : r.html ?? r.render?.() ?? "";
         el.innerHTML = rawHtml;
-        if ((r.setup || r.children) && !_teardown) {
-          const stops = [];
-          if (r.children) {
-            for (const [key, child] of Object.entries(r.children)) {
-              const sel = /^[.#[]/.test(key) ? key : `[data-r="${key}"]`;
-              const slot = el.querySelector(sel);
-              if (slot) stops.push(mount(slot, child));
-            }
+        if (r.setup && !_setupRan) {
+          _setupRan = true;
+          const cleanup = r.setup(el);
+          if (typeof cleanup === "function") _setupCleanup = cleanup;
+        }
+        if (r.children) {
+          const childStops = [];
+          for (const [key, child] of Object.entries(r.children)) {
+            const sel = /^[.#[]/.test(key) ? key : `[data-r="${key}"]`;
+            const slot = el.querySelector(sel);
+            if (slot) childStops.push(mount(slot, child));
           }
-          if (r.setup) {
-            const cleanup = r.setup(el);
-            if (typeof cleanup === "function") stops.push(cleanup);
-          }
-          _teardown = () => stops.forEach((f) => f?.());
+          _childrenStop = () => childStops.forEach((f) => f?.());
         }
       }
     } catch (e) {
@@ -156,10 +158,15 @@ var mount = (el, component, { escape = true } = {}) => {
   });
   return () => {
     stop();
-    _teardown?.();
+    _setupCleanup?.();
+    _childrenStop?.();
   };
 };
-var show = (cond, yes, no = () => "") => () => cond.value ? yes() : no();
+var show = (cond, yes, no = "") => () => {
+  const v = cond && typeof cond === "object" && "value" in cond ? cond.value : cond;
+  const branch = v ? yes : no;
+  return typeof branch === "function" ? branch() : branch;
+};
 var bind = (el, sig) => {
   const stop = effect(() => {
     el.value = sig.value ?? "";
@@ -186,10 +193,14 @@ var delegate = /* @__PURE__ */ (() => {
     }, { capture: true });
   };
   return {
+    // Returns an unlisten function for handler-level deregistration
     on: (evt, sel, fn) => {
       ensure(evt);
-      reg.get(evt).push([sel, fn]);
+      const entry = [sel, fn];
+      reg.get(evt).push(entry);
+      return () => reg.set(evt, reg.get(evt).filter((e) => e !== entry));
     },
+    // Removes all handlers for a selector (kept for compat)
     off: (evt, sel) => {
       if (reg.has(evt)) reg.set(evt, reg.get(evt).filter(([s]) => s !== sel));
     }
@@ -201,7 +212,7 @@ var transitions = {
   fadeOut: (el) => animate(el, [{ opacity: 1 }, { opacity: 0 }], { duration: 180 }),
   slideDown: (el) => animate(el, [{ opacity: 0, transform: "translateY(-8px)" }, { opacity: 1, transform: "translateY(0)" }], { duration: 220 })
 };
-var keyedList = (itemsSig, renderItem, getKey = (i) => i.id ?? i.key, { escape = true } = {}) => {
+var keyedList = (itemsSig, renderItem, getKey = (i) => i.id ?? i.key, { escape = true, tag = "div" } = {}) => {
   const domMap = /* @__PURE__ */ new Map();
   return (parentEl) => effect(() => {
     try {
@@ -220,7 +231,7 @@ var keyedList = (itemsSig, renderItem, getKey = (i) => i.id ?? i.key, { escape =
         const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
         let el = domMap.get(key);
         if (!el) {
-          el = document.createElement("div");
+          el = document.createElement(tag);
           el.dataset.key = key;
           el.innerHTML = h2;
           domMap.set(key, el);
@@ -271,33 +282,41 @@ var virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5, { escape
     inner.style.height = `${items.length * itemHeight}px`;
   };
   wrap.addEventListener("scroll", update, { passive: true });
-  effect(() => {
+  const stopEffect = effect(() => {
     itemsSig.value;
     update();
   });
-  return { el: wrap, dispose: () => rendered.clear() };
+  return {
+    el: wrap,
+    dispose: () => {
+      rendered.clear();
+      wrap.removeEventListener("scroll", update);
+      stopEffect();
+    }
+  };
 };
 var createRouter = (routes) => {
   const current = signal(location.hash.slice(1) || "/");
-  const cache = /* @__PURE__ */ new Map();
   window.addEventListener("hashchange", () => {
     current.value = location.hash.slice(1) || "/";
   });
   const route = (() => {
-    const s = signal(void 0), deps = /* @__PURE__ */ new Set();
+    const s = signal(void 0);
     const run = () => {
       const path = current.value;
-      if (cache.has(path)) {
-        s.value = cache.get(path);
-        return;
-      }
       for (const [pat, comp] of Object.entries(routes)) {
-        if (pat === path || pat === "*") {
-          const r = typeof comp === "function" ? comp() : comp;
-          cache.set(path, r);
-          s.value = r;
+        if (pat === "*") continue;
+        const regex = new RegExp("^" + pat.replace(/:\w+/g, "([^/]+)") + "$");
+        const m = path.match(regex);
+        if (m) {
+          s.value = typeof comp === "function" ? comp(...m.slice(1)) : comp;
           return;
         }
+      }
+      if (routes["*"]) {
+        const c = routes["*"];
+        s.value = typeof c === "function" ? c() : c;
+        return;
       }
       s.value = null;
     };
@@ -344,11 +363,47 @@ var on = (el, evt, fn, opts) => {
 };
 var once = (el, evt, fn) => on(el, evt, fn, { once: true });
 var nextTick = (fn) => Promise.resolve().then(fn);
-var defineComponent = (fn, { name } = {}) => {
-  const component = (props = {}) => fn(props);
-  component.displayName = name ?? fn.name ?? "Component";
-  component.__isComponent = true;
-  return component;
+var defineComponent = (setup, { name } = {}) => {
+  const factory = (props = {}) => {
+    const stops = [], mountCbs = [], unmountCbs = [];
+    const ctx = {
+      signal: (v, opts) => signal(v, opts),
+      computed: (fn) => computed(fn),
+      effect: (fn) => {
+        const s = effect(fn);
+        stops.push(s);
+        return s;
+      },
+      asyncEffect: (fn) => {
+        const s = effect(() => {
+          const ctrl = new AbortController();
+          Promise.resolve(fn(ctrl.signal)).catch((e) => {
+            if (e?.name !== "AbortError") console.error("[asyncEffect]", e);
+          });
+          return () => ctrl.abort();
+        });
+        stops.push(s);
+        return s;
+      },
+      onMount: (fn) => mountCbs.push(fn),
+      onUnmount: (fn) => unmountCbs.push(fn)
+    };
+    const renderFn = setup(props, ctx);
+    return {
+      __isComponent: true,
+      html: typeof renderFn === "function" ? renderFn : () => String(renderFn ?? ""),
+      setup: (el) => {
+        nextTick(() => mountCbs.forEach((fn) => fn(el)));
+        return () => {
+          unmountCbs.forEach((fn) => fn());
+          stops.forEach((s) => s());
+        };
+      }
+    };
+  };
+  factory.displayName = name ?? setup.name ?? "Component";
+  factory.__isComponent = true;
+  return factory;
 };
 var debounce = (fn, ms) => {
   let t;
