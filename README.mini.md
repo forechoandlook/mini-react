@@ -15,7 +15,7 @@ import { signal, effect, computed, batch, watch, asyncEffect,
 - `asyncEffect(async (signal) => {})` — 异步副作用，重跑或 dispose 时自动 abort 上一次请求，async 错误不会被吞掉
 - `esc(str)` — HTML 转义，防 XSS
 - `html(str)` — 标记为受信任的 HTML，跳过转义
-- `mount(el, () => htmlStr)` — 挂载组件，传函数保证在 effect 内执行，依赖变化自动更新
+- `mount(el, () => htmlStr)` — 挂载组件，传函数保证在 effect 内执行，依赖变化自动更新；重渲染时若被聚焦的元素有 `id` 或 `name`，会自动在新 DOM 里找到同一个元素并恢复焦点 + 光标位置（`{ escape: false }` 下渲染 `<input>` 等表单元素时尤其重要，否则每次按键都会因为 innerHTML 被整体替换而失焦）
 - `show(cond, yes, no?)` — 条件渲染；`cond` 可以是 signal 或普通值，`yes`/`no` 可以是字符串或函数
 - `bind(inputEl, sig)` — 表单双向绑定，返回 dispose 函数
 - `text(sig)` — 绑定描述符，更新 `el.textContent`，传给 `mount` 使用
@@ -27,7 +27,7 @@ import { signal, effect, computed, batch, watch, asyncEffect,
 - `transitions.fadeIn(el)` / `transitions.fadeOut(el)` / `transitions.slideDown(el)` — 预设动画
 - `keyedList(itemsSig, item => htmlStr, item => item.id, { escape: false, tag: 'div' })` — 有 key 的列表，只更新变化项，自带动画；`tag` 可指定容器元素类型（如 `'li'` 用于 `<ul>`）；调用方式：`keyedList(...)(parentEl)`
 - `virtualList(itemsSig, item => htmlStr, itemHeight)` — 超长列表虚拟滚动，返回 `{ el, dispose }`
-- `createRouter(routes)` — hash 路由，支持 `:param` 参数路由，无缓存（保证响应式组件不过期）；返回 `{ current, route, navigate(path), match(pattern) }`
+- `createRouter(routes, { keepAlive? })` — hash 路由，支持 `:param` 参数路由；默认 `keepAlive: false`，每次访问都重新调用 route 工厂（组件本地状态不保留）；`keepAlive: true` 时按 `pattern + params` 缓存组件实例，离开再回来时复用同一实例、`signal()` 状态保留（但实例内部的 `ctx.effect`/`ctx.asyncEffect` 会在离开时停止，不会在返回时自动恢复——只有渲染用到的 signal 值会保留）；返回 `{ current, route, navigate(path), match(pattern), invalidate(pattern?) }`，`invalidate()` 清空全部缓存，`invalidate('/a')` 只清该路由
 - `h\`<div>${component}</div>\`` — 模板字面量，值为函数或组件对象时自动挂载到 slot，普通值自动转义
 - `defineComponent((props, ctx) => () => htmlStr)` — 有状态组件，见下方说明
 - `$(id)` — `document.getElementById` 简写

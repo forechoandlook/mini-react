@@ -6,17 +6,100 @@ export const text = sig        => ({ __bind:'text',  sig, render: el => el.textC
 export const cls  = mapSig     => ({ __bind:'class', sig: mapSig, render: el => el.className = Object.entries(mapSig.value).filter(([,v])=>v).map(([k])=>k).join(' ') });
 export const attr = (name,sig) => ({ __bind:'attr',  name, sig, render: el => el.setAttribute(name, sig.value) });
 
+// ── Focus preservation across innerHTML replacement ────────────────────────────
+// A plain `el.innerHTML = ...` re-render destroys and recreates every node in
+// `el`, so a focused <input>/<textarea> (e.g. a search box bound to its own
+// signal) loses focus on every keystroke — the browser drops the old node,
+// the new one starts unfocused, and only one character lands per render.
+// We snapshot which element had focus (+ its selection) before the swap and
+// re-locate the equivalent element afterwards to restore it.
+function _focusPath(root, node) {
+  if (!node || !root.contains(node)) return null;
+  if (node.id) return { by: 'id', id: node.id, tag: node.tagName };
+  const name = node.getAttribute?.('name');
+  if (name) return { by: 'name', name, tag: node.tagName };
+  const path = [];
+  let cur = node;
+  while (cur && cur !== root) {
+    const parent = cur.parentNode;
+    if (!parent) return null;
+    path.unshift([...parent.children].indexOf(cur));
+    cur = parent;
+  }
+  return { by: 'path', tag: node.tagName, path };
+}
+
+// Avoids relying on the global CSS.escape (not always present outside real
+// browsers, e.g. in test runners) for the handful of characters that would
+// otherwise break the attribute-selector strings built below.
+const _escAttr = s => String(s).replace(/["\\]/g, '\\$&');
+
+function _resolveFocusPath(root, info) {
+  if (!info) return null;
+  let found = null;
+  if (info.by === 'id') found = root.querySelector(`[id="${_escAttr(info.id)}"]`);
+  else if (info.by === 'name') found = root.querySelector(`${info.tag}[name="${_escAttr(info.name)}"]`);
+  else {
+    let cur = root;
+    for (const idx of info.path) { cur = cur?.children?.[idx]; if (!cur) break; }
+    found = cur ?? null;
+  }
+  return found && found.tagName === info.tag ? found : null;
+}
+
+function _captureFocus(root) {
+  const active = document.activeElement;
+  if (!active || !root.contains(active)) return () => {};
+  const info = _focusPath(root, active);
+  if (!info) return () => {};
+  const isTextField = 'selectionStart' in active && typeof active.selectionStart === 'number';
+  const selStart = isTextField ? active.selectionStart : null;
+  const selEnd = isTextField ? active.selectionEnd : null;
+  const scrollTop = active.scrollTop;
+  return () => {
+    const next = _resolveFocusPath(root, info);
+    if (!next || next === active) return;
+    next.focus({ preventScroll: true });
+    if (isTextField && 'setSelectionRange' in next && selStart != null) {
+      try { next.setSelectionRange(selStart, selEnd); } catch {}
+    }
+    next.scrollTop = scrollTop;
+  };
+}
+
 // ── DOM mount ─────────────────────────────────────────────────────────────────
 export const mount = (el, component, { escape = true } = {}) => {
-  let _setupRan = false, _setupCleanup = null, _childrenStop = null;
+  // Identity for the "run setup once" rule below.
+  //  - defineComponent() tags each instance with a stable `__cid`, so a
+  //    *different* component swapped into the same mount point (e.g. a
+  //    router switching routes) is correctly detected as new and gets its
+  //    own setup()/onMount — while the *same* cached instance revisited
+  //    (router keepAlive) is correctly recognized and setup is not rerun.
+  //  - Plain `{ html, setup }` object literals returned fresh from the
+  //    render function every time (a common, tested pattern — there's no
+  //    stable reference to compare) have no `__cid`; for those we keep the
+  //    original behavior of running setup exactly once ever for this mount
+  //    point, since object identity can't tell "same logical component" from
+  //    "different one" for them.
+  let _everSetup = false, _lastCid, _setupCleanup = null, _childrenStop = null;
 
   const stop = effect(() => {
     try {
+      const restoreFocus = _captureFocus(el);
+
       // Stop children from previous render before replacing innerHTML
       _childrenStop?.();
       _childrenStop = null;
 
       const r = typeof component === 'function' ? component() : component;
+      const cid = r && typeof r === 'object' ? r.__cid : undefined;
+      const isNewComponent = cid !== undefined ? cid !== _lastCid : !_everSetup;
+
+      if (isNewComponent && _everSetup) {
+        _setupCleanup?.();
+        _setupCleanup = null;
+      }
+
       if (typeof r === 'string')           { el.innerHTML = escape ? esc(r) : r; }
       else if (r?.__trusted)              { el.innerHTML = r.value; }
       else if (r?.__bind)                 { r.render(el); }
@@ -24,9 +107,9 @@ export const mount = (el, component, { escape = true } = {}) => {
         const rawHtml = typeof r.html === 'function' ? r.html() : (r.html ?? r.render?.() ?? '');
         el.innerHTML = rawHtml;
 
-        // Setup runs once only
-        if (r.setup && !_setupRan) {
-          _setupRan = true;
+        // Setup runs once per distinct component instance
+        if (r.setup && isNewComponent) {
+          _everSetup = true;
           const cleanup = r.setup(el);
           if (typeof cleanup === 'function') _setupCleanup = cleanup;
         }
@@ -42,6 +125,8 @@ export const mount = (el, component, { escape = true } = {}) => {
           _childrenStop = () => childStops.forEach(f => f?.());
         }
       }
+      if (cid !== undefined) _lastCid = cid;
+      restoreFocus();
     } catch (e) { console.error('[mount]', e); el.innerHTML = `<div style="color:#f85149">Render error</div>`; }
   });
 
@@ -164,21 +249,49 @@ export const virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5,
 };
 
 // ── Router ────────────────────────────────────────────────────────────────────
-export const createRouter = routes => {
+// keepAlive: false (default) — every navigation calls the route's factory
+// fresh, matching prior behavior (a route's local component state does not
+// survive leaving and returning to it).
+// keepAlive: true — the component instance returned by a route's factory is
+// cached per (pattern + params) and reused on repeat visits, so its signals/
+// effects/DOM keep running in the background instead of being torn down and
+// recreated. Safe to enable now that mount() scopes setup()/onMount to the
+// specific component *instance* rather than firing at most once ever per
+// mount point — earlier that dual-purpose flag caused a stale cache attempt
+// to be reverted (see git history) because a cached instance's setup would
+// never re-run for a *different* component swapped into the same slot.
+export const createRouter = (routes, { keepAlive = false } = {}) => {
   const current = signal(location.hash.slice(1) || '/');
   window.addEventListener('hashchange', () => { current.value = location.hash.slice(1) || '/'; });
+  const cache = keepAlive ? new Map() : null;
+  const resolve = (key, factory) => {
+    if (!keepAlive) return factory();
+    if (cache.has(key)) return cache.get(key);
+    const inst = factory();
+    cache.set(key, inst);
+    return inst;
+  };
   const route = (() => {
     const s = signal(undefined);
     const run = () => {
       const path = current.value;
-      // Fix: support :param routes; removed stale cache that broke reactive components
       for (const [pat, comp] of Object.entries(routes)) {
         if (pat === '*') continue;
         const regex = new RegExp('^' + pat.replace(/:\w+/g, '([^/]+)') + '$');
         const m = path.match(regex);
-        if (m) { s.value = typeof comp === 'function' ? comp(...m.slice(1)) : comp; return; }
+        if (m) {
+          const params = m.slice(1);
+          s.value = typeof comp === 'function'
+            ? resolve(`${pat}|${params.join('/')}`, () => comp(...params))
+            : comp;
+          return;
+        }
       }
-      if (routes['*']) { const c = routes['*']; s.value = typeof c === 'function' ? c() : c; return; }
+      if (routes['*']) {
+        const c = routes['*'];
+        s.value = typeof c === 'function' ? resolve('*', c) : c;
+        return;
+      }
       s.value = null;
     };
     effect(run);
@@ -188,6 +301,14 @@ export const createRouter = routes => {
     current, route,
     navigate: path => { location.hash = path; },
     match: pat => { const m = current.value.match(new RegExp('^' + pat.replace(/:\w+/g,'([^/]+)') + '$')); return m ? m.slice(1) : null; },
+    // Drop cached instance(s) so the next visit rebuilds fresh. Omit `pattern`
+    // to clear everything; pass a route pattern to clear just that route
+    // (across all of its param combinations).
+    invalidate: pattern => {
+      if (!cache) return;
+      if (pattern === undefined) { cache.clear(); return; }
+      for (const k of [...cache.keys()]) if (k === pattern || k.startsWith(`${pattern}|`)) cache.delete(k);
+    },
   };
 };
 
@@ -240,6 +361,10 @@ export const defineComponent = (setup, { name } = {}) => {
     const renderFn = setup(props, ctx);
     return {
       __isComponent: true,
+      // Stable per-instance id so mount() can tell "same instance, revisited"
+      // (skip setup) apart from "a different component swapped in" (run its
+      // setup) — see the comment in mount() for why this matters.
+      __cid: Symbol(name ?? setup.name ?? 'Component'),
       html: typeof renderFn === 'function' ? renderFn : () => String(renderFn ?? ''),
       setup: el => {
         nextTick(() => mountCbs.forEach(fn => fn(el)));

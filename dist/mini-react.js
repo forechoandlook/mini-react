@@ -1,7 +1,7 @@
-/* mini-react/all v0.1.3 | https://github.com/forechoandlook/mini-react */
+/* mini-react/all v0.1.4 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
-var version = true ? "0.1.3" : "dev";
+var version = true ? "0.1.4" : "dev";
 var _eff = null;
 var _tracking = null;
 var _batchDepth = 0;
@@ -128,13 +128,75 @@ var html = (s) => ({ __trusted: true, value: String(s ?? "") });
 var text = (sig) => ({ __bind: "text", sig, render: (el) => el.textContent = esc(sig.value) });
 var cls = (mapSig) => ({ __bind: "class", sig: mapSig, render: (el) => el.className = Object.entries(mapSig.value).filter(([, v]) => v).map(([k]) => k).join(" ") });
 var attr = (name, sig) => ({ __bind: "attr", name, sig, render: (el) => el.setAttribute(name, sig.value) });
+function _focusPath(root, node) {
+  if (!node || !root.contains(node)) return null;
+  if (node.id) return { by: "id", id: node.id, tag: node.tagName };
+  const name = node.getAttribute?.("name");
+  if (name) return { by: "name", name, tag: node.tagName };
+  const path = [];
+  let cur = node;
+  while (cur && cur !== root) {
+    const parent = cur.parentNode;
+    if (!parent) return null;
+    path.unshift([...parent.children].indexOf(cur));
+    cur = parent;
+  }
+  return { by: "path", tag: node.tagName, path };
+}
+var _escAttr = (s) => String(s).replace(/["\\]/g, "\\$&");
+function _resolveFocusPath(root, info) {
+  if (!info) return null;
+  let found = null;
+  if (info.by === "id") found = root.querySelector(`[id="${_escAttr(info.id)}"]`);
+  else if (info.by === "name") found = root.querySelector(`${info.tag}[name="${_escAttr(info.name)}"]`);
+  else {
+    let cur = root;
+    for (const idx of info.path) {
+      cur = cur?.children?.[idx];
+      if (!cur) break;
+    }
+    found = cur ?? null;
+  }
+  return found && found.tagName === info.tag ? found : null;
+}
+function _captureFocus(root) {
+  const active = document.activeElement;
+  if (!active || !root.contains(active)) return () => {
+  };
+  const info = _focusPath(root, active);
+  if (!info) return () => {
+  };
+  const isTextField = "selectionStart" in active && typeof active.selectionStart === "number";
+  const selStart = isTextField ? active.selectionStart : null;
+  const selEnd = isTextField ? active.selectionEnd : null;
+  const scrollTop = active.scrollTop;
+  return () => {
+    const next = _resolveFocusPath(root, info);
+    if (!next || next === active) return;
+    next.focus({ preventScroll: true });
+    if (isTextField && "setSelectionRange" in next && selStart != null) {
+      try {
+        next.setSelectionRange(selStart, selEnd);
+      } catch {
+      }
+    }
+    next.scrollTop = scrollTop;
+  };
+}
 var mount = (el, component, { escape = true } = {}) => {
-  let _setupRan = false, _setupCleanup = null, _childrenStop = null;
+  let _everSetup = false, _lastCid, _setupCleanup = null, _childrenStop = null;
   const stop = effect(() => {
     try {
+      const restoreFocus = _captureFocus(el);
       _childrenStop?.();
       _childrenStop = null;
       const r = typeof component === "function" ? component() : component;
+      const cid = r && typeof r === "object" ? r.__cid : void 0;
+      const isNewComponent = cid !== void 0 ? cid !== _lastCid : !_everSetup;
+      if (isNewComponent && _everSetup) {
+        _setupCleanup?.();
+        _setupCleanup = null;
+      }
       if (typeof r === "string") {
         el.innerHTML = escape ? esc(r) : r;
       } else if (r?.__trusted) {
@@ -144,8 +206,8 @@ var mount = (el, component, { escape = true } = {}) => {
       } else if (r && typeof r === "object") {
         const rawHtml = typeof r.html === "function" ? r.html() : r.html ?? r.render?.() ?? "";
         el.innerHTML = rawHtml;
-        if (r.setup && !_setupRan) {
-          _setupRan = true;
+        if (r.setup && isNewComponent) {
+          _everSetup = true;
           const cleanup = r.setup(el);
           if (typeof cleanup === "function") _setupCleanup = cleanup;
         }
@@ -159,6 +221,8 @@ var mount = (el, component, { escape = true } = {}) => {
           _childrenStop = () => childStops.forEach((f) => f?.());
         }
       }
+      if (cid !== void 0) _lastCid = cid;
+      restoreFocus();
     } catch (e) {
       console.error("[mount]", e);
       el.innerHTML = `<div style="color:#f85149">Render error</div>`;
@@ -303,11 +367,19 @@ var virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5, { escape
     }
   };
 };
-var createRouter = (routes) => {
+var createRouter = (routes, { keepAlive = false } = {}) => {
   const current = signal(location.hash.slice(1) || "/");
   window.addEventListener("hashchange", () => {
     current.value = location.hash.slice(1) || "/";
   });
+  const cache = keepAlive ? /* @__PURE__ */ new Map() : null;
+  const resolve = (key, factory) => {
+    if (!keepAlive) return factory();
+    if (cache.has(key)) return cache.get(key);
+    const inst = factory();
+    cache.set(key, inst);
+    return inst;
+  };
   const route = (() => {
     const s = signal(void 0);
     const run = () => {
@@ -317,13 +389,14 @@ var createRouter = (routes) => {
         const regex = new RegExp("^" + pat.replace(/:\w+/g, "([^/]+)") + "$");
         const m = path.match(regex);
         if (m) {
-          s.value = typeof comp === "function" ? comp(...m.slice(1)) : comp;
+          const params = m.slice(1);
+          s.value = typeof comp === "function" ? resolve(`${pat}|${params.join("/")}`, () => comp(...params)) : comp;
           return;
         }
       }
       if (routes["*"]) {
         const c = routes["*"];
-        s.value = typeof c === "function" ? c() : c;
+        s.value = typeof c === "function" ? resolve("*", c) : c;
         return;
       }
       s.value = null;
@@ -340,6 +413,17 @@ var createRouter = (routes) => {
     match: (pat) => {
       const m = current.value.match(new RegExp("^" + pat.replace(/:\w+/g, "([^/]+)") + "$"));
       return m ? m.slice(1) : null;
+    },
+    // Drop cached instance(s) so the next visit rebuilds fresh. Omit `pattern`
+    // to clear everything; pass a route pattern to clear just that route
+    // (across all of its param combinations).
+    invalidate: (pattern) => {
+      if (!cache) return;
+      if (pattern === void 0) {
+        cache.clear();
+        return;
+      }
+      for (const k of [...cache.keys()]) if (k === pattern || k.startsWith(`${pattern}|`)) cache.delete(k);
     }
   };
 };
@@ -399,6 +483,10 @@ var defineComponent = (setup, { name } = {}) => {
     const renderFn = setup(props, ctx);
     return {
       __isComponent: true,
+      // Stable per-instance id so mount() can tell "same instance, revisited"
+      // (skip setup) apart from "a different component swapped in" (run its
+      // setup) — see the comment in mount() for why this matters.
+      __cid: Symbol(name ?? setup.name ?? "Component"),
       html: typeof renderFn === "function" ? renderFn : () => String(renderFn ?? ""),
       setup: (el) => {
         nextTick(() => mountCbs.forEach((fn) => fn(el)));
