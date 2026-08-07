@@ -1,4 +1,4 @@
-/* mini-react/dom v0.1.4 | https://github.com/forechoandlook/mini-react */
+/* mini-react/dom v0.1.5 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
 var _eff = null;
@@ -113,7 +113,8 @@ var watch = (sig, cb) => {
 var onCleanup = (fn) => {
   if (_currCleanups) _currCleanups.push(fn);
 };
-var esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+var _escMap = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+var esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => _escMap[c]);
 var html = (s) => ({ __trusted: true, value: String(s ?? "") });
 
 // src/dom.js

@@ -100,5 +100,9 @@ export const asyncEffect = fn => effect(() => {
   return () => ctrl.abort();
 });
 
-export const esc  = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+// Single regex pass instead of 4 chained .replace() calls — esc() runs on
+// every interpolated value in every h`` template and every keyedList/
+// virtualList item render, so this is one of the hottest paths in the lib.
+const _escMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+export const esc  = s => String(s ?? '').replace(/[&<>"]/g, c => _escMap[c]);
 export const html = s => ({ __trusted: true, value: String(s ?? '') });
