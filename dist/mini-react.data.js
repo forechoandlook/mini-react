@@ -6,6 +6,22 @@ var _tracking = null;
 var _batchDepth = 0;
 var _currCleanups = null;
 var _pending = /* @__PURE__ */ new Set();
+var _mode = "sync";
+var _microtaskFlushScheduled = false;
+function _scheduleMicrotaskFlush() {
+  if (_microtaskFlushScheduled) return;
+  _microtaskFlushScheduled = true;
+  queueMicrotask(() => {
+    _microtaskFlushScheduled = false;
+    flushSync();
+  });
+}
+var flushSync = () => {
+  if (_pending.size === 0) return;
+  const q = [..._pending];
+  _pending.clear();
+  for (const f of q) f();
+};
 var Signal = class {
   constructor(v, eq) {
     this._v = v;
@@ -22,8 +38,9 @@ var Signal = class {
   set value(v) {
     if (this._eq(v, this._v)) return;
     this._v = v;
-    if (_batchDepth > 0) {
+    if (_batchDepth > 0 || _mode === "microtask") {
       for (const f of this._subs) _pending.add(f);
+      if (_mode === "microtask" && _batchDepth === 0) _scheduleMicrotaskFlush();
     } else {
       for (const f of [...this._subs]) f();
     }
@@ -93,9 +110,7 @@ var batch = (fn) => {
     fn();
   } finally {
     if (--_batchDepth === 0) {
-      const q = [..._pending];
-      _pending.clear();
-      for (const f of q) f();
+      flushSync();
     }
   }
 };

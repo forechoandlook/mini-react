@@ -1,5 +1,5 @@
-export { signal, computed, effect, batch, watch, onCleanup, esc, html } from './core.js';
-import { signal, computed, effect, esc } from './core.js';
+export { signal, computed, effect, batch, watch, onCleanup, esc, html, store, setUpdateMode, getUpdateMode, flushSync } from './core.js';
+import { signal, computed, effect, batch, esc } from './core.js';
 
 // ── Bind descriptors ──────────────────────────────────────────────────────────
 export const text = sig        => ({ __bind:'text',  sig, render: el => el.textContent = esc(sig.value) });
@@ -36,15 +36,15 @@ const _escAttr = s => String(s).replace(/["\\]/g, '\\$&');
 
 function _resolveFocusPath(root, info) {
   if (!info) return null;
-  let found = null;
-  if (info.by === 'id') found = root.querySelector(`[id="${_escAttr(info.id)}"]`);
-  else if (info.by === 'name') found = root.querySelector(`${info.tag}[name="${_escAttr(info.name)}"]`);
-  else {
-    let cur = root;
-    for (const idx of info.path) { cur = cur?.children?.[idx]; if (!cur) break; }
-    found = cur ?? null;
-  }
-  return found && found.tagName === info.tag ? found : null;
+  // id/name are an explicit, author-chosen signal of "same logical slot" —
+  // trust them even across a tag change (e.g. an <input id="q"> swapped for
+  // a <button id="q">). The positional path has no such intent behind it, so
+  // it only counts as a match when the tag also still lines up.
+  if (info.by === 'id') return root.querySelector(`[id="${_escAttr(info.id)}"]`);
+  if (info.by === 'name') return root.querySelector(`[name="${_escAttr(info.name)}"]`);
+  let cur = root;
+  for (const idx of info.path) { cur = cur?.children?.[idx]; if (!cur) break; }
+  return cur && cur.tagName === info.tag ? cur : null;
 }
 
 function _captureFocus(root) {
@@ -67,6 +67,412 @@ function _captureFocus(root) {
   };
 }
 
+// ── Morph (DOM-to-DOM diff/patch) ───────────────────────────────────────────────
+// Replaces the old "blind el.innerHTML = newHtml" render step. Instead of
+// tearing down and recreating every node on every re-render, this walks the
+// existing live DOM in parallel with the freshly-rendered HTML and patches
+// only what actually changed — unchanged nodes (and their focus/selection/
+// scroll/internal state) are left alone. Matching is by explicit key
+// (`data-key` attribute, or `id` as an implicit key) first, falling back to
+// same-tag positional matching for everything else — the same rule
+// `keyedList` already used for lists, now applied to all rendering.
+function _nodeKey(n) {
+  if (!n || n.nodeType !== 1) return null;
+  const dk = n.getAttribute('data-key');
+  if (dk != null) return `k:${dk}`;
+  if (n.id) return `id:${n.id}`;
+  return null;
+}
+
+function _sameNodeType(a, b) {
+  if (a.nodeType !== b.nodeType) return false;
+  return a.nodeType === 1 ? a.tagName === b.tagName : true;
+}
+
+// Form controls track "live" state (typed value, checked, selection) that
+// doesn't round-trip through attributes — and must never be clobbered while
+// the user is actively interacting with the element.
+function _patchAttrs(oldEl, newEl) {
+  const newAttrs = newEl.attributes, oldAttrs = oldEl.attributes;
+  for (let i = 0; i < newAttrs.length; i++) {
+    const { name, value } = newAttrs[i];
+    if (oldEl.getAttribute(name) !== value) oldEl.setAttribute(name, value);
+  }
+  for (let i = oldAttrs.length - 1; i >= 0; i--) {
+    const name = oldAttrs[i].name;
+    if (!newEl.hasAttribute(name)) oldEl.removeAttribute(name);
+  }
+  const tag = oldEl.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') {
+    if (oldEl !== document.activeElement && oldEl.value !== newEl.value) oldEl.value = newEl.value;
+    if (tag === 'INPUT') {
+      const checked = newEl.hasAttribute('checked');
+      if (oldEl.checked !== checked) oldEl.checked = checked;
+    }
+  } else if (tag === 'OPTION') {
+    const selected = newEl.hasAttribute('selected');
+    if (oldEl.selected !== selected) oldEl.selected = selected;
+  }
+}
+
+function _patchNode(oldNode, newNode) {
+  if (oldNode.nodeType === 3 || oldNode.nodeType === 8) { // text / comment
+    if (oldNode.data !== newNode.data) oldNode.data = newNode.data;
+    return;
+  }
+  if (oldNode.nodeType !== 1) return;
+  _patchAttrs(oldNode, newNode);
+  _morphChildren(oldNode, newNode);
+}
+
+function _morphChildren(parent, newParent) {
+  const initialOld = new Set(parent.childNodes);
+  const oldKeyMap = new Map();
+  for (const n of parent.childNodes) {
+    const k = _nodeKey(n);
+    if (k != null && !oldKeyMap.has(k)) oldKeyMap.set(k, n);
+  }
+
+  const usedOld = new Set();
+  let oldCursor = parent.firstChild;
+  let newChild = newParent.firstChild;
+
+  while (newChild) {
+    const nextNewChild = newChild.nextSibling;
+    const k = _nodeKey(newChild);
+    let match = null;
+    if (k != null) {
+      const candidate = oldKeyMap.get(k);
+      // Same key but a different tag (e.g. `id="q"` used first on an
+      // <input>, then on a <button>) can't be patched in place — attributes
+      // like `value`/`checked` wouldn't make sense on the new tag, and
+      // tagName itself is immutable. Fall through to a real replace.
+      if (candidate && !usedOld.has(candidate) && _sameNodeType(candidate, newChild)) match = candidate;
+    } else if (
+      oldCursor && initialOld.has(oldCursor) && !usedOld.has(oldCursor) &&
+      _nodeKey(oldCursor) == null && _sameNodeType(oldCursor, newChild)
+    ) {
+      match = oldCursor;
+    }
+
+    if (match) {
+      if (match !== oldCursor) parent.insertBefore(match, oldCursor);
+      _patchNode(match, newChild);
+      usedOld.add(match);
+      oldCursor = match.nextSibling;
+    } else {
+      parent.insertBefore(document.importNode(newChild, true), oldCursor);
+    }
+    newChild = nextNewChild;
+  }
+
+  for (const n of initialOld) {
+    if (!usedOld.has(n) && n.parentNode === parent) parent.removeChild(n);
+  }
+}
+
+/** Diff+patch `el`'s children against freshly-parsed `htmlStr` in place. */
+function _morphInto(el, htmlStr) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = htmlStr;
+  _morphChildren(el, tpl.content);
+}
+
+// ── Compiled templates (h``) ────────────────────────────────────────────────────
+// The morph engine above still pays for a string-rebuild + native HTML parse
+// on every render, even when only one value inside a big template changed —
+// that's the real remaining cost the "skip if identical string" check can't
+// touch. This gives h`` templates a way around both: a tagged template
+// literal's `strings` array is the *same object reference* on every call to
+// the same callsite (guaranteed by the JS spec, even inside a loop/function
+// called repeatedly), so we can compile the static structure once per
+// callsite — parse it into a <template> a single time, and record exactly
+// where each interpolated value lands — then on every render just
+// `cloneNode` (native, no parsing) and poke the handful of values that
+// actually changed directly into their known spot. No string rebuild, no
+// re-parse, no tree diff.
+//
+// Caveat shared with every library that uses this technique (e.g. lit-html):
+// classifying "is this slot inside a tag (attribute) or in child content" is
+// done by scanning the static text for an unclosed `<` — a literal `<`/`>`
+// in text content (not as a tag) will confuse it. Use `&lt;`/`&gt;` there.
+const _templateCache = new WeakMap(); // strings array -> { tpl, bindings }
+
+function _classifySlotKinds(strings) {
+  const kinds = [];
+  let acc = '';
+  for (let i = 0; i < strings.length - 1; i++) {
+    acc += strings[i];
+    kinds.push(acc.lastIndexOf('<') > acc.lastIndexOf('>') ? 'attr' : 'child');
+  }
+  return kinds;
+}
+
+function _recordBindings(root) {
+  const bindings = [];
+  const walk = (node, path) => {
+    if (node.nodeType === 8) { // comment marker for a child-position slot
+      const m = /^@@h(\d+)@@$/.exec(node.data);
+      if (m) bindings.push({ path, kind: 'child', index: Number(m[1]) });
+      return;
+    }
+    if (node.nodeType === 1) {
+      for (const a of [...node.attributes]) {
+        if (a.value.includes('@@h')) {
+          const slots = [...a.value.matchAll(/@@h(\d+)@@/g)].map(mm => Number(mm[1]));
+          bindings.push({ path, kind: 'attr', attrName: a.name, template: a.value, slots });
+        }
+      }
+    }
+    const kids = node.childNodes;
+    for (let i = 0; i < kids.length; i++) walk(kids[i], [...path, i]);
+  };
+  for (let i = 0; i < root.childNodes.length; i++) walk(root.childNodes[i], [i]);
+  return bindings;
+}
+
+function _compileTemplate(strings) {
+  let compiled = _templateCache.get(strings);
+  if (compiled) return compiled;
+  const kinds = _classifySlotKinds(strings);
+  let html = strings[0];
+  for (let i = 0; i < kinds.length; i++) {
+    html += kinds[i] === 'child' ? `<!--@@h${i}@@-->` : `@@h${i}@@`;
+    html += strings[i + 1];
+  }
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  compiled = { tpl, bindings: _recordBindings(tpl.content) };
+  _templateCache.set(strings, compiled);
+  return compiled;
+}
+
+function _resolvePath(root, path) {
+  let node = root;
+  for (const i of path) node = node.childNodes[i];
+  return node;
+}
+
+function _isComponentValue(v) {
+  return typeof v === 'function' || (v != null && typeof v === 'object' &&
+    (v.__isComponent || v.__isTemplateResult || v.html != null || v.setup || v.children));
+}
+
+function _teardownForEntry(entry) {
+  entry.rowStop?.();
+  entry.tplState?.dispose?.();
+  for (const n of entry.nodes) n.parentNode?.removeChild(n);
+}
+
+function _teardownChildBinding(lb) {
+  lb.childStop?.();
+  lb.childStop = null;
+  if (lb.forMap) { for (const entry of lb.forMap.values()) _teardownForEntry(entry); lb.forMap = null; }
+  for (const n of lb.owned) n.parentNode?.removeChild(n);
+  lb.owned = [];
+}
+
+// Renders `result` (an h`` result or plain string) into `entry`, replacing
+// entry.nodes in place at their current DOM position when the template
+// shape changes. No-ops on the DOM entirely if nothing about the rendered
+// output actually changed (the inner _update*Binding calls are themselves
+// Object.is-gated per slot).
+function _renderForEntry(parent, entry, result) {
+  const swap = newNodes => {
+    if (entry.nodes.length) {
+      const anchor = entry.nodes[entry.nodes.length - 1].nextSibling;
+      for (const n of entry.nodes) n.parentNode?.removeChild(n);
+      for (const n of newNodes) parent.insertBefore(n, anchor);
+    }
+    entry.nodes = newNodes;
+  };
+  if (result?.__isTemplateResult) {
+    const { tpl, bindings } = _compileTemplate(result.strings);
+    if (!entry.tplState || entry.tplState.tpl !== tpl) {
+      entry.tplState?.dispose();
+      const root = tpl.content.cloneNode(true);
+      const liveBindings = bindings.map(b => _instantiateBinding(root, b));
+      swap([...root.childNodes]);
+      entry.tplState = { tpl, liveBindings, dispose: () => liveBindings.forEach(b => b.kind === 'child' && _teardownChildBinding(b)) };
+    }
+    for (const b of entry.tplState.liveBindings) {
+      if (b.kind === 'attr') _updateAttrBinding(b, result.values);
+      else _updateChildBinding(b, result.values);
+    }
+  } else {
+    // Plain-string fallback: no fine-grained patch, just a per-item HTML reparse.
+    const html = result == null ? '' : String(result);
+    if (entry.lastHtml !== html) {
+      const t = document.createElement('template');
+      t.innerHTML = html;
+      swap([...t.content.childNodes]);
+      entry.lastHtml = html;
+    }
+  }
+}
+
+// Keyed list reconciliation for h`` templates (see `For` below). Each item's
+// render() is itself an h`` result, so unlike the string-template `morph`
+// path this never rebuilds/reparses HTML: existing rows are cloned once
+// (native, no parsing) and thereafter only their changed slots are poked;
+// only add/remove/reorder touches real DOM nodes at all.
+//
+// Each row gets its own persistent effect (entry.rowStop) wrapping
+// `render(item, i)`. It's driven by entry.itemSig/entry.indexSig rather than
+// plain fields specifically so that a `store()` row (see core.js) works for
+// free: if `render` reads `store()`-backed fields, this effect subscribes to
+// those exact field signals, and a later `row.field = x` reruns *only* this
+// one row's effect directly — `_updateForBinding` below is never even
+// called, so the O(n) key-diff loop doesn't run at all for pure field edits.
+// For a plain immutable-array item (the `.map()`/`.filter()` pattern), the
+// item reference itself is what changes, so the fast path's
+// `entry.itemSig.value = items[i]` is what triggers the rerun instead — same
+// mechanism, no special-casing needed between the two.
+//
+// Fast path: when the key sequence is byte-for-byte the same as last time
+// (no add/remove/reorder), touch only entry.itemSig — Signal already no-ops
+// on an unchanged reference, so untouched rows cost one reference compare
+// and nothing else.
+function _updateForBinding(lb, forVal) {
+  const { items, keyFn, render } = forVal;
+  if (lb.lastKind !== 'for') {
+    _teardownChildBinding(lb);
+    lb.forMap = new Map();
+    lb.forKeys = [];
+    lb.lastKind = 'for';
+  }
+  const map = lb.forMap;
+  const parent = lb.marker.parentNode;
+
+  let sameShape = items.length === lb.forKeys.length;
+  if (sameShape) {
+    for (let i = 0; i < items.length; i++) {
+      if (keyFn(items[i], i) !== lb.forKeys[i]) { sameShape = false; break; }
+    }
+  }
+
+  if (sameShape) {
+    for (let i = 0; i < items.length; i++) {
+      map.get(lb.forKeys[i]).itemSig.value = items[i]; // no-op unless the reference changed
+    }
+    return;
+  }
+
+  // Structural path: add/remove/reorder happened — full keyed reconciliation.
+  const usedKeys = new Set();
+  const newKeys = new Array(items.length);
+  let cursor = lb.marker;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const key = keyFn(item, i);
+    newKeys[i] = key;
+    usedKeys.add(key);
+    let entry = map.get(key);
+    if (!entry) {
+      entry = { nodes: [], tplState: null, itemSig: signal(item), indexSig: signal(i), rowStop: null };
+      entry.rowStop = effect(() => _renderForEntry(parent, entry, render(entry.itemSig.value, entry.indexSig.value)));
+      map.set(key, entry);
+    } else {
+      batch(() => { entry.indexSig.value = i; entry.itemSig.value = item; }); // coalesce into a single rerun
+    }
+
+    let after = cursor.nextSibling;
+    for (const n of entry.nodes) {
+      if (n !== after) parent.insertBefore(n, after);
+      after = n.nextSibling;
+    }
+    cursor = entry.nodes[entry.nodes.length - 1] ?? cursor;
+  }
+
+  for (const [key, entry] of map) {
+    if (!usedKeys.has(key)) { _teardownForEntry(entry); map.delete(key); }
+  }
+  lb.forKeys = newKeys;
+}
+
+function _updateChildBinding(lb, values) {
+  const value = values[lb.index];
+  if (value?.__isFor) { _updateForBinding(lb, value); lb.lastValue = value; return; }
+  if (Object.is(value, lb.lastValue)) return; // the actual fine-grained skip
+  lb.lastValue = value;
+
+  if (_isComponentValue(value)) {
+    _teardownChildBinding(lb);
+    const wrapper = document.createElement('span');
+    wrapper.style.display = 'contents';
+    lb.marker.after(wrapper);
+    lb.childStop = mount(wrapper, () => (typeof value === 'function' ? value() : value));
+    lb.owned = [wrapper];
+    lb.lastKind = 'component';
+    return;
+  }
+
+  if (value != null && typeof value === 'object' && value.__trusted) {
+    _teardownChildBinding(lb);
+    const tpl = document.createElement('template');
+    tpl.innerHTML = value.value;
+    const nodes = [...tpl.content.childNodes];
+    lb.marker.after(...nodes);
+    lb.owned = nodes;
+    lb.lastKind = 'trusted';
+    return;
+  }
+
+  // Plain value → a single safe Text node (Text nodes can't be interpreted
+  // as markup, so this needs no manual escaping at all).
+  const text = value == null ? '' : String(value);
+  if (lb.lastKind === 'text' && lb.owned[0]) { lb.owned[0].data = text; return; }
+  _teardownChildBinding(lb);
+  const textNode = document.createTextNode(text);
+  lb.marker.after(textNode);
+  lb.owned = [textNode];
+  lb.lastKind = 'text';
+}
+
+function _updateAttrBinding(lb, values) {
+  let changed = false;
+  for (const slot of lb.slots) if (lb.lastValues[slot] !== values[slot]) changed = true;
+  if (!changed) return;
+  let out = lb.template;
+  for (const slot of lb.slots) {
+    lb.lastValues[slot] = values[slot];
+    out = out.split(`@@h${slot}@@`).join(values[slot] == null ? '' : String(values[slot]));
+  }
+  const tag = lb.el.tagName;
+  if (lb.attrName === 'value' && (tag === 'INPUT' || tag === 'TEXTAREA')) {
+    if (lb.el !== document.activeElement && lb.el.value !== out) lb.el.value = out;
+    return;
+  }
+  if (lb.el.getAttribute(lb.attrName) !== out) lb.el.setAttribute(lb.attrName, out);
+}
+
+function _instantiateBinding(root, binding) {
+  const node = _resolvePath(root, binding.path);
+  if (binding.kind === 'attr') {
+    return { kind: 'attr', el: node, attrName: binding.attrName, template: binding.template, slots: binding.slots, lastValues: {} };
+  }
+  return { kind: 'child', marker: node, index: binding.index, owned: [], lastValue: undefined, lastKind: null, childStop: null };
+}
+
+/** Render an h`` TemplateResult into `el`, reusing the live instance across renders when the template shape is unchanged. */
+function _renderTemplateResult(el, result, prevState) {
+  const { tpl, bindings } = _compileTemplate(result.strings);
+  let state = prevState;
+  if (!state || state.tpl !== tpl) {
+    state?.dispose();
+    const root = tpl.content.cloneNode(true);
+    const liveBindings = bindings.map(b => _instantiateBinding(root, b));
+    el.textContent = '';
+    el.appendChild(root);
+    state = { tpl, liveBindings, dispose: () => liveBindings.forEach(lb => lb.kind === 'child' && _teardownChildBinding(lb)) };
+  }
+  for (const lb of state.liveBindings) {
+    if (lb.kind === 'attr') _updateAttrBinding(lb, result.values);
+    else _updateChildBinding(lb, result.values);
+  }
+  return state;
+}
+
 // ── DOM mount ─────────────────────────────────────────────────────────────────
 export const mount = (el, component, { escape = true } = {}) => {
   // Identity for the "run setup once" rule below.
@@ -82,6 +488,21 @@ export const mount = (el, component, { escape = true } = {}) => {
   //    point, since object identity can't tell "same logical component" from
   //    "different one" for them.
   let _everSetup = false, _lastCid, _setupCleanup = null, _childrenStop = null;
+  // Last HTML string actually parsed+morphed into `el`. The effect below
+  // reruns whenever a *read* signal changes, which isn't the same as "the
+  // rendered *output* changed" — a broader effect rerunning for an unrelated
+  // reason, or two notifications collapsing to the same result, can produce
+  // byte-identical markup. Skipping the parse+diff in that case avoids the
+  // most expensive step (native HTML parsing) for a render that would have
+  // patched nothing anyway. This does NOT reduce cost for the common case of
+  // "template output genuinely changed a little" — regenerating the string
+  // and parsing it is unavoidable there given the string-template model.
+  let _lastHtml;
+  // Live compiled-template instance (see h`` / _renderTemplateResult above).
+  // Kept across renders (unlike everything else here) specifically so it can
+  // be reused — that persistence is the whole point of the fast path.
+  let _tplState = null;
+  const _dropTplState = () => { _tplState?.dispose(); _tplState = null; };
 
   const stop = effect(() => {
     try {
@@ -100,12 +521,30 @@ export const mount = (el, component, { escape = true } = {}) => {
         _setupCleanup = null;
       }
 
-      if (typeof r === 'string')           { el.innerHTML = escape ? esc(r) : r; }
-      else if (r?.__trusted)              { el.innerHTML = r.value; }
-      else if (r?.__bind)                 { r.render(el); }
+      if (typeof r === 'string') {
+        _dropTplState();
+        if (escape) {
+          // Escaped plain text is always exactly one text node — no HTML to
+          // parse/diff, just keep (or create) that single node and update it.
+          if (el.childNodes.length !== 1 || el.firstChild.nodeType !== 3) el.textContent = r;
+          else if (el.firstChild.data !== r) el.firstChild.data = r;
+        } else if (r !== _lastHtml) {
+          _morphInto(el, r);
+          _lastHtml = r;
+        }
+      }
+      else if (r?.__trusted) {
+        _dropTplState();
+        if (r.value !== _lastHtml) { _morphInto(el, r.value); _lastHtml = r.value; }
+      }
+      else if (r?.__bind)                 { _dropTplState(); r.render(el); }
+      else if (r?.__isTemplateResult) {
+        _tplState = _renderTemplateResult(el, r, _tplState);
+      }
       else if (r && typeof r === 'object') {
+        _dropTplState();
         const rawHtml = typeof r.html === 'function' ? r.html() : (r.html ?? r.render?.() ?? '');
-        el.innerHTML = rawHtml;
+        if (rawHtml !== _lastHtml) { _morphInto(el, rawHtml); _lastHtml = rawHtml; }
 
         // Setup runs once per distinct component instance
         if (r.setup && isNewComponent) {
@@ -125,12 +564,13 @@ export const mount = (el, component, { escape = true } = {}) => {
           _childrenStop = () => childStops.forEach(f => f?.());
         }
       }
+      else { _dropTplState(); }
       if (cid !== undefined) _lastCid = cid;
       restoreFocus();
     } catch (e) { console.error('[mount]', e); el.innerHTML = `<div style="color:#f85149">Render error</div>`; }
   });
 
-  return () => { stop(); _setupCleanup?.(); _childrenStop?.(); };
+  return () => { stop(); _setupCleanup?.(); _childrenStop?.(); _dropTplState(); };
 };
 
 export const show = (cond, yes, no = '') => () => {
@@ -154,7 +594,10 @@ export const delegate = (() => {
     if (reg.has(evt)) return;
     reg.set(evt, []);
     document.addEventListener(evt, e => {
-      for (const [sel, fn] of reg.get(evt)) { const t = e.target.closest(sel); if (t) fn(e, t); }
+      // A single dispatch is a natural synchronous batch boundary: coalesce
+      // every signal write any handler makes during this event into one
+      // effect flush, instead of one flush per write.
+      batch(() => { for (const [sel, fn] of reg.get(evt)) { const t = e.target.closest(sel); if (t) fn(e, t); } });
     }, { capture: true });
   };
   return {
@@ -180,6 +623,12 @@ export const transitions = {
 
 // ── Keyed list ────────────────────────────────────────────────────────────────
 // tag option lets callers control the wrapper element type (e.g. 'li' for <ul>)
+// `renderItem` may return an h`` result — reuses the same compiled-template
+// clone+patch machinery as `For` (parse the row shape once, then only poke
+// changed slots), instead of always reparsing an HTML string per item. Plain
+// strings/`html()` still work exactly as before (innerHTML replace) for
+// backward compatibility. Enter/exit animations and reorder-by-insertBefore
+// are unchanged either way.
 export const keyedList = (itemsSig, renderItem, getKey = i => i.id ?? i.key, { escape = true, tag = 'div' } = {}) => {
   const domMap = new Map();
   return parentEl => effect(() => {
@@ -188,6 +637,7 @@ export const keyedList = (itemsSig, renderItem, getKey = i => i.id ?? i.key, { e
       const live  = new Set(items.map(getKey));
       for (const [key, el] of [...domMap]) {
         if (!live.has(key)) {
+          el.__tplState?.dispose?.();
           transitions.fadeOut(el).finished?.then(() => el.remove()) ?? el.remove();
           domMap.delete(key);
         }
@@ -196,14 +646,19 @@ export const keyedList = (itemsSig, renderItem, getKey = i => i.id ?? i.key, { e
       for (const item of items) {
         const key = getKey(item);
         const raw = renderItem(item);
-        const h   = escape && typeof raw === 'string' && !raw?.__trusted ? esc(raw) : (raw?.value ?? raw);
         let el = domMap.get(key);
         if (!el) {
           el = document.createElement(tag);
-          el.dataset.key = key; el.innerHTML = h;
+          el.dataset.key = key;
           domMap.set(key, el); parentEl.appendChild(el);
           transitions.slideDown(el);
-        } else if (el.innerHTML !== h) { el.innerHTML = h; }
+        }
+        if (raw?.__isTemplateResult) {
+          el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
+        } else {
+          const h = escape && typeof raw === 'string' && !raw?.__trusted ? esc(raw) : (raw?.value ?? raw);
+          if (el.innerHTML !== h) el.innerHTML = h;
+        }
         if (prev) { const next = prev.nextSibling; if (next !== el) parentEl.insertBefore(el, next); }
         else if (parentEl.firstChild !== el) parentEl.insertBefore(el, parentEl.firstChild);
         prev = el;
@@ -228,15 +683,21 @@ export const virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5,
     for (let i = start; i < end; i++) {
       const item = items[i], key = item.id ?? item.key ?? i;
       vis.add(key);
-      if (!rendered.has(key)) {
-        const el = document.createElement('div');
+      let el = rendered.get(key);
+      if (!el) {
+        el = document.createElement('div');
         Object.assign(el.style, { position:'absolute', top:`${i*itemHeight}px`, height:`${itemHeight}px`, width:'100%' });
-        const raw = renderItem(item);
-        el.innerHTML = escape && typeof raw === 'string' && !raw?.__trusted ? esc(raw) : (raw?.value ?? raw);
         inner.appendChild(el); rendered.set(key, el);
       }
+      const raw = renderItem(item);
+      if (raw?.__isTemplateResult) {
+        el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
+      } else {
+        const h = escape && typeof raw === 'string' && !raw?.__trusted ? esc(raw) : (raw?.value ?? raw);
+        if (el.innerHTML !== h) el.innerHTML = h;
+      }
     }
-    for (const [k, el] of rendered) if (!vis.has(k)) { el.remove(); rendered.delete(k); }
+    for (const [k, el] of rendered) if (!vis.has(k)) { el.__tplState?.dispose?.(); el.remove(); rendered.delete(k); }
     inner.style.height = `${items.length * itemHeight}px`;
   };
   wrap.addEventListener('scroll', update, { passive: true });
@@ -313,28 +774,16 @@ export const createRouter = (routes, { keepAlive = false } = {}) => {
 };
 
 // ── Component template literal ────────────────────────────────────────────────
-export const h = (strings, ...values) => {
-  let htmlStr = '';
-  const children = {};
-  let idx = 0;
-  strings.forEach((str, i) => {
-    htmlStr += str;
-    if (i < values.length) {
-      const val = values[i];
-      const isComp = val !== null && val !== undefined &&
-        (typeof val === 'function' || val?.__isComponent ||
-         (typeof val === 'object' && (val.html != null || val.setup || val.children)));
-      if (isComp) {
-        const id = `__s${idx++}`;
-        htmlStr += `<span data-slot="${id}"></span>`;
-        children[`[data-slot="${id}"]`] = val;
-      } else {
-        htmlStr += esc(String(val ?? ''));
-      }
-    }
-  });
-  return Object.keys(children).length ? { html: htmlStr, children } : htmlStr;
-};
+// `strings` is the same array reference every time this literal's callsite
+// runs (a JS spec guarantee), which is what lets _compileTemplate() cache
+// the parsed structure once per callsite and mount() patch it in place on
+// every later render — see the "Compiled templates" block above `mount()`.
+export const h = (strings, ...values) => ({ __isTemplateResult: true, strings, values });
+
+// Keyed list for use as an h`` child slot, e.g. `h\`<tbody>${For(rows, r => r.id, r => h\`<tr>...\`)}</tbody>\``.
+// render(item, index) should return another h`` result (fine-grained: only
+// changed cells patch) or a plain string (whole-row reparse fallback).
+export const For = (items, keyFn, render) => ({ __isFor: true, items, keyFn, render });
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
 export const $         = id => document.getElementById(id);
@@ -347,8 +796,37 @@ export const nextTick  = fn => Promise.resolve().then(fn);
 // For stateful components with private signals, effects, and lifecycle hooks.
 // setup(props, ctx) runs once; return a render function () => htmlString.
 // All ctx.effect and ctx.asyncEffect are automatically stopped on unmount.
+// Shallow prop equality — same rule React's memo()/Solid's untrack-diffing
+// use: same key set, every value `Object.is`-equal. New object literals
+// (the common `Child({ label: x })` call shape) never pass `===`, so this
+// is what actually lets repeated calls with unchanged props be recognized
+// as "nothing changed" rather than "a new component".
+function _shallowEqualProps(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const ak = Object.keys(a), bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) if (!Object.is(a[k], b[k])) return false;
+  return true;
+}
+
 export const defineComponent = (setup, { name } = {}) => {
+  // One memo slot per defineComponent() call (i.e. per component *type* used
+  // at one logical position). Calling the factory again with shallow-equal
+  // props returns the exact same instance object — no new __cid, no setup()
+  // rerun, no DOM teardown/remount — instead of building (and immediately
+  // throwing away) a brand-new instance on every parent re-render, which is
+  // what happened before: a fresh __cid on every call meant mount()'s
+  // "same instance revisited" check could never succeed for components
+  // embedded via h`` (only the router's explicit instance cache benefited).
+  // This only helps a component used at a single call site; multiple
+  // simultaneous instances of the same type (e.g. one factory reused in a
+  // loop) will thrash the single slot and just get no memoization — never
+  // incorrect reuse, since a props mismatch always falls through to a fresh
+  // instance. For per-instance memoization across a list, use `For`/`store`.
+  let _cache = null; // { props, instance }
   const factory = (props = {}) => {
+    if (_cache && _shallowEqualProps(_cache.props, props)) return _cache.instance;
     const stops = [], mountCbs = [], unmountCbs = [];
     const ctx = {
       signal:      (v, opts) => signal(v, opts),
@@ -359,7 +837,7 @@ export const defineComponent = (setup, { name } = {}) => {
       onUnmount:   fn        => unmountCbs.push(fn),
     };
     const renderFn = setup(props, ctx);
-    return {
+    const instance = {
       __isComponent: true,
       // Stable per-instance id so mount() can tell "same instance, revisited"
       // (skip setup) apart from "a different component swapped in" (run its
@@ -368,9 +846,17 @@ export const defineComponent = (setup, { name } = {}) => {
       html: typeof renderFn === 'function' ? renderFn : () => String(renderFn ?? ''),
       setup: el => {
         nextTick(() => mountCbs.forEach(fn => fn(el)));
-        return () => { unmountCbs.forEach(fn => fn()); stops.forEach(s => s()); };
+        return () => {
+          unmountCbs.forEach(fn => fn());
+          stops.forEach(s => s());
+          // Only this exact instance's own teardown may clear the memo slot —
+          // if a newer call already replaced it, that newer entry must stand.
+          if (_cache?.instance === instance) _cache = null;
+        };
       },
     };
+    _cache = { props, instance };
+    return instance;
   };
   factory.displayName = name ?? setup.name ?? 'Component';
   factory.__isComponent = true;

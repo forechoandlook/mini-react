@@ -168,32 +168,40 @@ describe('bind descriptors', () => {
   });
 });
 
+// h`` is a compiled-template TemplateResult now (see dom.js's "Compiled
+// templates" section) — its own return shape ({ __isTemplateResult, strings,
+// values }) is an implementation detail, so these test what it actually
+// renders to via mount() rather than poking at its internals.
 describe('h tagged template', () => {
-  it('纯字符串返回字符串', () => {
-    const result = h`<div>hello</div>`;
-    assert.equal(typeof result, 'string');
-    assert.equal(result, '<div>hello</div>');
+  it('纯字符串模板渲染为对应 DOM', () => {
+    const d = div();
+    mount(d, () => h`<div>hello</div>`);
+    assert.equal(d.innerHTML, '<div>hello</div>');
   });
 
-  it('非组件插值自动转义', () => {
+  it('非组件插值自动转义（Text 节点天然安全，不需要手动转义）', () => {
     const name = '<b>Alice</b>';
-    const result = h`<p>${name}</p>`;
-    assert.equal(result, '<p>&lt;b&gt;Alice&lt;/b&gt;</p>');
+    const d = div();
+    mount(d, () => h`<p>${name}</p>`);
+    // textContent, not innerHTML: h`` leaves a harmless anchor comment per
+    // interpolation in the markup (see edge.test.js's note on this).
+    assert.equal(d.querySelector('p').textContent, '<b>Alice</b>');
+    assert.ok(!d.querySelector('p').querySelector('b'), '插值内容必须是纯文本，不能被解析成真实的 <b> 元素');
   });
 
-  it('组件插值生成 { html, children }', () => {
+  it('组件插值挂载后正常渲染', () => {
     const Child = () => 'child';
-    const result = h`<div>${Child}</div>`;
-    assert.equal(typeof result, 'object');
-    assert.ok(result.html.includes('data-slot'));
-    assert.ok(Object.keys(result.children).length === 1);
+    const d = div();
+    mount(d, () => h`<div>${Child}</div>`);
+    assert.ok(d.textContent.includes('child'));
   });
 
-  it('多个子组件各有独立 slot', () => {
+  it('多个子组件各自独立渲染', () => {
     const A = () => 'a';
     const B = () => 'b';
-    const result = h`<div>${A}${B}</div>`;
-    assert.equal(Object.keys(result.children).length, 2);
+    const d = div();
+    mount(d, () => h`<div>${A}${B}</div>`);
+    assert.ok(d.textContent.includes('a') && d.textContent.includes('b'));
   });
 
   it('挂载后子组件正常渲染', () => {
@@ -201,6 +209,16 @@ describe('h tagged template', () => {
     const d = div();
     mount(d, () => h`<div>${Child}</div>`);
     assert.ok(d.innerHTML.includes('hello'));
+  });
+
+  it('同一挂载点上，值变化时只更新对应节点，不重建其余内容（编译模板复用）', () => {
+    const n = signal(1);
+    const d = div();
+    mount(d, () => h`<div id="wrap"><span id="fixed">static</span> count: ${n.value}</div>`);
+    const fixedBefore = d.querySelector('#fixed');
+    n.value = 2;
+    assert.equal(d.querySelector('#fixed'), fixedBefore, '未变化部分的节点应原地保留');
+    assert.ok(d.textContent.includes('count: 2'));
   });
 });
 

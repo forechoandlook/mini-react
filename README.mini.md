@@ -2,15 +2,17 @@
 轻量响应式框架，无构建，纯 ES Module。
 ```js
 import { signal, effect, computed, batch, watch, asyncEffect,
-         mount, show, bind, text, cls, attr, h, defineComponent,
+         mount, show, bind, text, cls, attr, h, For, store, defineComponent,
          delegate, keyedList, virtualList, createRouter,
+         setUpdateMode, getUpdateMode, flushSync,
          $, $$, on, once, nextTick, debounce, throttle, debouncedSignal,
          esc, html } from 'https://cdn.jsdelivr.net/gh/forechoandlook/mini-react@latest/dist/mini-react.min.js';
 ```
 - `signal(v)` — 创建响应式值，`.value` 读写（追踪依赖），`.peek()` 读但不追踪
 - `computed(() => expr)` — 派生值，自动追踪依赖，只读
 - `effect(() => { ... return cleanup })` — 副作用，依赖变化自动重跑，返回 dispose 函数
-- `batch(() => { a.value=1; b.value=2 })` — 合并多次写入，effect 只触发一次
+- `batch(() => { a.value=1; b.value=2 })` — 合并多次写入，effect 只触发一次；`delegate.on` 的事件分发已经自动包了一层 `batch`，一个事件处理函数里改多个 signal 本来就只触发一次渲染
+- `setUpdateMode('sync' | 'microtask')` — 全局更新模式，默认 `'sync'`（写 signal 立即同步生效，全库/全部测试都假设这个）；切到 `'microtask'` 后，同一个同步任务里对任意多个 signal 的写入会自动合并成一次 flush（在下一个 microtask），代价是写完不能立刻读到最新 DOM，需要 `await nextTick()`。这是一个全局开关，不支持同一个应用里混用两种模式。`getUpdateMode()` 读当前模式，`flushSync()` 在 `'microtask'` 模式下强制立即提交挂起的更新
 - `watch(sig, (next, prev) => {})` — 值变化时回调，不立即执行，正确遵守 signal 的自定义 equals
 - `asyncEffect(async (signal) => {})` — 异步副作用，重跑或 dispose 时自动 abort 上一次请求，async 错误不会被吞掉
 - `esc(str)` — HTML 转义，防 XSS
@@ -25,11 +27,13 @@ import { signal, effect, computed, batch, watch, asyncEffect,
 - `delegate.off('click', '[data-action]')` — 移除该 selector 下所有 handler
 - `animate(el, keyframes, opts)` — Web Animations API 封装
 - `transitions.fadeIn(el)` / `transitions.fadeOut(el)` / `transitions.slideDown(el)` — 预设动画
-- `keyedList(itemsSig, item => htmlStr, item => item.id, { escape: false, tag: 'div' })` — 有 key 的列表，只更新变化项，自带动画；`tag` 可指定容器元素类型（如 `'li'` 用于 `<ul>`）；调用方式：`keyedList(...)(parentEl)`
-- `virtualList(itemsSig, item => htmlStr, itemHeight)` — 超长列表虚拟滚动，返回 `{ el, dispose }`
+- `keyedList(itemsSig, item => htmlStr, item => item.id, { escape: false, tag: 'div' })` — 有 key 的列表，只更新变化项，自带动画；`tag` 可指定容器元素类型（如 `'li'` 用于 `<ul>`）；调用方式：`keyedList(...)(parentEl)`；`renderItem` 除了返回字符串，也可以返回 `h\`\`` 结果——这样单项内容更新走编译模板的细粒度 patch（只写变化的插值点），而不是整段重新解析 HTML；增删/淡入淡出动画行为不变
+- `virtualList(itemsSig, item => htmlStr, itemHeight)` — 超长列表虚拟滚动，返回 `{ el, dispose }`；`renderItem` 同样可以返回 `h\`\`` 结果享受细粒度 patch；已可见的行在数据变化时也会被更新（不再是只在首次进入可视区时渲染一次就冻结）
 - `createRouter(routes, { keepAlive? })` — hash 路由，支持 `:param` 参数路由；默认 `keepAlive: false`，每次访问都重新调用 route 工厂（组件本地状态不保留）；`keepAlive: true` 时按 `pattern + params` 缓存组件实例，离开再回来时复用同一实例、`signal()` 状态保留（但实例内部的 `ctx.effect`/`ctx.asyncEffect` 会在离开时停止，不会在返回时自动恢复——只有渲染用到的 signal 值会保留）；返回 `{ current, route, navigate(path), match(pattern), invalidate(pattern?) }`，`invalidate()` 清空全部缓存，`invalidate('/a')` 只清该路由
-- `h\`<div>${component}</div>\`` — 模板字面量，值为函数或组件对象时自动挂载到 slot，普通值自动转义
-- `defineComponent((props, ctx) => () => htmlStr)` — 有状态组件，见下方说明
+- `h\`<div>${component}</div>\`` — 编译一次结构、克隆+精确打补丁的模板字面量（不是每次重新解析 HTML 字符串），值为函数或组件对象时自动挂载到 slot，普通值自动转义。同一个 callsite 多次渲染只解析一次
+- `For(items, keyFn, (item, i) => h\`...\`)` — `h\`\`` 模板里的键控列表插槽，例如 `h\`<tbody>${For(rows.value, r => r.id, r => h\`<tr data-key="${r.id}">...</tr>\`)}</tbody>\``。每行本身是嵌套的 `h\`\`` 模板：结构只解析一次，之后新增行只是原生 `cloneNode`，已有行只 patch 变化的插值点；增删/重排走 O(变化量) 的 keyed diff，不会重建未受影响的行；配合 `store()`（见下）单元格更新可以做到 O(1)，完全不经过外层的 key-diff
+- `store(array)` — 按字段细粒度响应的数组：`store[i].field` 读取时才懒创建一个该字段的 `Signal`，写 `store[i].field = x` 只通知读过这个字段的 effect，不牵连其它行/字段。`push`/`splice`/`sort`/整行替换/`length =` 等结构性操作会让受影响的行失去身份缓存并触发一次整体重渲染；纯字段读取（`.length`、`for..of`）不会被字段写入误触发。搭配 `For` 使用时，单元格更新是 O(1) 且完全不经过 `For` 的外层扫描——注意每个被读过的字段都会分配一个独立的 `Signal` 对象，字段多、行数多时比同样数据的普通数组多占不少内存，不需要逐字段细粒度更新的场景优先用普通 `signal(array)` + `.map()`
+- `defineComponent((props, ctx) => () => htmlStr)` — 有状态组件，见下方说明。同一个 `defineComponent()` 定义的组件，如果连续两次调用时 props 浅比较相等（同 key、每个值 `Object.is` 相等），会直接复用上一次的实例（不重跑 `setup`、不触发 `onUnmount`/`onMount`、DOM 不会被拆除重建）——这只对"同一个位置渲染一个组件"生效；同一个组件类型在循环里同时渲染多个实例时不会互相串状态，但也拿不到这个优化
 - `$(id)` — `document.getElementById` 简写
 - `$$(sel, root?)` — `querySelectorAll` 简写，返回数组
 - `on(el, evt, fn)` — addEventListener，返回 unlisten 函数

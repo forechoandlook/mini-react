@@ -233,33 +233,45 @@ describe('children key 规则', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Note: h`` keeps a small HTML comment node per interpolation as a permanent
+// anchor (same technique lit-html uses) so later renders can patch that spot
+// directly without re-parsing — so `.innerHTML` always has a few harmless
+// `<!--@@hN@@-->` markers mixed in. They don't affect textContent, layout,
+// or CSS selectors; assertions here use textContent to sidestep them.
 describe('h tagged template — 边界情况', () => {
   it('null/undefined 插值渲染为空字符串', () => {
-    assert.equal(h`<p>${null}</p>`, '<p></p>');
-    assert.equal(h`<p>${undefined}</p>`, '<p></p>');
+    const d = div();
+    mount(d, () => h`<p>${null}</p>`);
+    assert.equal(d.querySelector('p').textContent, '');
+    mount(d, () => h`<p>${undefined}</p>`);
+    assert.equal(d.querySelector('p').textContent, '');
   });
 
-  it('数字插值转义后内联', () => {
-    assert.equal(h`<p>${42}</p>`, '<p>42</p>');
+  it('数字插值内联为文本', () => {
+    const d = div();
+    mount(d, () => h`<p>${42}</p>`);
+    assert.equal(d.querySelector('p').textContent, '42');
   });
 
-  it('组件结果对象（{ html }）识别为组件', () => {
-    const result = h`<div>${{ html: '<b>x</b>', setup: () => {} }}</div>`;
-    assert.equal(typeof result, 'object');
-    assert.ok(result.html.includes('data-slot'));
+  it('组件结果对象（{ html }）识别为组件并挂载', () => {
+    const d = div();
+    mount(d, () => h`<div>${{ html: () => '<b>x</b>', setup: () => {} }}</div>`);
+    assert.ok(d.innerHTML.includes('<b>x</b>'));
   });
 
-  it('__isComponent 标记的对象识别为组件', () => {
-    const Comp = defineComponent(() => 'hi');
-    const result = h`<div>${Comp}</div>`;
-    assert.equal(typeof result, 'object'); // 被识别为组件，不是字符串
+  it('__isComponent 标记的对象识别为组件并挂载', () => {
+    const Comp = defineComponent(() => () => 'hi');
+    const d = div();
+    mount(d, () => h`<div>${Comp()}</div>`);
+    assert.ok(d.textContent.includes('hi'));
   });
 
-  it('混合插值：字符串转义，组件占位', () => {
+  it('混合插值：字符串转义，组件正常渲染', () => {
     const Child = () => 'child';
-    const result = h`<div>${'<b>evil</b>'}${Child}</div>`;
-    assert.ok(result.html.includes('&lt;b&gt;')); // 字符串被转义
-    assert.ok(result.html.includes('data-slot')); // 组件有占位
+    const d = div();
+    mount(d, () => h`<div>${'<b>evil</b>'}${Child}</div>`);
+    assert.ok(d.innerHTML.includes('&lt;b&gt;')); // 字符串被转义
+    assert.ok(d.textContent.includes('child'));
   });
 });
 

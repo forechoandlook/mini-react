@@ -7,6 +7,27 @@ var _tracking = null;
 var _batchDepth = 0;
 var _currCleanups = null;
 var _pending = /* @__PURE__ */ new Set();
+var _mode = "sync";
+var _microtaskFlushScheduled = false;
+var setUpdateMode = (mode) => {
+  if (mode !== "sync" && mode !== "microtask") throw new TypeError(`setUpdateMode: expected 'sync' or 'microtask', got ${mode}`);
+  _mode = mode;
+};
+var getUpdateMode = () => _mode;
+function _scheduleMicrotaskFlush() {
+  if (_microtaskFlushScheduled) return;
+  _microtaskFlushScheduled = true;
+  queueMicrotask(() => {
+    _microtaskFlushScheduled = false;
+    flushSync();
+  });
+}
+var flushSync = () => {
+  if (_pending.size === 0) return;
+  const q = [..._pending];
+  _pending.clear();
+  for (const f of q) f();
+};
 var Signal = class {
   constructor(v, eq) {
     this._v = v;
@@ -23,8 +44,9 @@ var Signal = class {
   set value(v) {
     if (this._eq(v, this._v)) return;
     this._v = v;
-    if (_batchDepth > 0) {
+    if (_batchDepth > 0 || _mode === "microtask") {
       for (const f of this._subs) _pending.add(f);
+      if (_mode === "microtask" && _batchDepth === 0) _scheduleMicrotaskFlush();
     } else {
       for (const f of [...this._subs]) f();
     }
@@ -94,9 +116,7 @@ var batch = (fn) => {
     fn();
   } finally {
     if (--_batchDepth === 0) {
-      const q = [..._pending];
-      _pending.clear();
-      for (const f of q) f();
+      flushSync();
     }
   }
 };
@@ -121,6 +141,98 @@ var asyncEffect = (fn) => effect(() => {
   });
   return () => ctrl.abort();
 });
+var _idxRe = /^\d+$/;
+var _structuralMethods = ["push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill", "copyWithin"];
+function _wrapRow(arr, index, rowCache) {
+  let entry = rowCache.get(index);
+  if (entry) return entry.proxy;
+  const fields = /* @__PURE__ */ new Map();
+  const fieldSignal = (prop) => {
+    let s = fields.get(prop);
+    if (!s) {
+      s = new Signal(arr[index]?.[prop]);
+      fields.set(prop, s);
+    }
+    return s;
+  };
+  const proxy = new Proxy({}, {
+    get(_, prop) {
+      if (typeof prop === "symbol") return arr[index]?.[prop];
+      return fieldSignal(prop).value;
+    },
+    set(_, prop, value) {
+      const target = arr[index];
+      if (target) target[prop] = value;
+      fieldSignal(prop).value = value;
+      return true;
+    },
+    has(_, prop) {
+      return arr[index] != null && prop in arr[index];
+    },
+    ownKeys() {
+      return arr[index] ? Reflect.ownKeys(arr[index]) : [];
+    },
+    getOwnPropertyDescriptor(_, prop) {
+      const target = arr[index];
+      if (!target || !(prop in target)) return void 0;
+      return { enumerable: true, configurable: true, value: fieldSignal(prop).value };
+    }
+  });
+  rowCache.set(index, { proxy });
+  return proxy;
+}
+var store = (initial) => {
+  if (!Array.isArray(initial)) throw new TypeError("store() currently only supports arrays");
+  const arr = initial;
+  const structural = new Signal(0, () => false);
+  const rowCache = /* @__PURE__ */ new Map();
+  const bump = () => {
+    structural.value = structural._v + 1;
+  };
+  return new Proxy(arr, {
+    get(target, prop, receiver) {
+      if (prop === "length") {
+        structural.value;
+        return target.length;
+      }
+      if (typeof prop === "string" && _idxRe.test(prop)) {
+        structural.value;
+        const idx = Number(prop);
+        return idx < target.length ? _wrapRow(target, idx, rowCache) : void 0;
+      }
+      if (prop === Symbol.iterator) {
+        return function* () {
+          structural.value;
+          for (let i = 0; i < target.length; i++) yield _wrapRow(target, i, rowCache);
+        };
+      }
+      if (_structuralMethods.includes(prop)) {
+        return (...args) => {
+          rowCache.clear();
+          const res = Array.prototype[prop].apply(target, args);
+          bump();
+          return res;
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+    set(target, prop, value) {
+      if (typeof prop === "string" && _idxRe.test(prop)) {
+        target[Number(prop)] = value;
+        rowCache.delete(Number(prop));
+        bump();
+        return true;
+      }
+      if (prop === "length") {
+        target.length = value;
+        rowCache.clear();
+        bump();
+        return true;
+      }
+      return Reflect.set(target, prop, value);
+    }
+  });
+};
 var _escMap = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
 var esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => _escMap[c]);
 var html = (s) => ({ __trusted: true, value: String(s ?? "") });
@@ -147,18 +259,14 @@ function _focusPath(root, node) {
 var _escAttr = (s) => String(s).replace(/["\\]/g, "\\$&");
 function _resolveFocusPath(root, info) {
   if (!info) return null;
-  let found = null;
-  if (info.by === "id") found = root.querySelector(`[id="${_escAttr(info.id)}"]`);
-  else if (info.by === "name") found = root.querySelector(`${info.tag}[name="${_escAttr(info.name)}"]`);
-  else {
-    let cur = root;
-    for (const idx of info.path) {
-      cur = cur?.children?.[idx];
-      if (!cur) break;
-    }
-    found = cur ?? null;
+  if (info.by === "id") return root.querySelector(`[id="${_escAttr(info.id)}"]`);
+  if (info.by === "name") return root.querySelector(`[name="${_escAttr(info.name)}"]`);
+  let cur = root;
+  for (const idx of info.path) {
+    cur = cur?.children?.[idx];
+    if (!cur) break;
   }
-  return found && found.tagName === info.tag ? found : null;
+  return cur && cur.tagName === info.tag ? cur : null;
 }
 function _captureFocus(root) {
   const active = document.activeElement;
@@ -184,8 +292,336 @@ function _captureFocus(root) {
     next.scrollTop = scrollTop;
   };
 }
+function _nodeKey(n) {
+  if (!n || n.nodeType !== 1) return null;
+  const dk = n.getAttribute("data-key");
+  if (dk != null) return `k:${dk}`;
+  if (n.id) return `id:${n.id}`;
+  return null;
+}
+function _sameNodeType(a, b) {
+  if (a.nodeType !== b.nodeType) return false;
+  return a.nodeType === 1 ? a.tagName === b.tagName : true;
+}
+function _patchAttrs(oldEl, newEl) {
+  const newAttrs = newEl.attributes, oldAttrs = oldEl.attributes;
+  for (let i = 0; i < newAttrs.length; i++) {
+    const { name, value } = newAttrs[i];
+    if (oldEl.getAttribute(name) !== value) oldEl.setAttribute(name, value);
+  }
+  for (let i = oldAttrs.length - 1; i >= 0; i--) {
+    const name = oldAttrs[i].name;
+    if (!newEl.hasAttribute(name)) oldEl.removeAttribute(name);
+  }
+  const tag = oldEl.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA") {
+    if (oldEl !== document.activeElement && oldEl.value !== newEl.value) oldEl.value = newEl.value;
+    if (tag === "INPUT") {
+      const checked = newEl.hasAttribute("checked");
+      if (oldEl.checked !== checked) oldEl.checked = checked;
+    }
+  } else if (tag === "OPTION") {
+    const selected = newEl.hasAttribute("selected");
+    if (oldEl.selected !== selected) oldEl.selected = selected;
+  }
+}
+function _patchNode(oldNode, newNode) {
+  if (oldNode.nodeType === 3 || oldNode.nodeType === 8) {
+    if (oldNode.data !== newNode.data) oldNode.data = newNode.data;
+    return;
+  }
+  if (oldNode.nodeType !== 1) return;
+  _patchAttrs(oldNode, newNode);
+  _morphChildren(oldNode, newNode);
+}
+function _morphChildren(parent, newParent) {
+  const initialOld = new Set(parent.childNodes);
+  const oldKeyMap = /* @__PURE__ */ new Map();
+  for (const n of parent.childNodes) {
+    const k = _nodeKey(n);
+    if (k != null && !oldKeyMap.has(k)) oldKeyMap.set(k, n);
+  }
+  const usedOld = /* @__PURE__ */ new Set();
+  let oldCursor = parent.firstChild;
+  let newChild = newParent.firstChild;
+  while (newChild) {
+    const nextNewChild = newChild.nextSibling;
+    const k = _nodeKey(newChild);
+    let match = null;
+    if (k != null) {
+      const candidate = oldKeyMap.get(k);
+      if (candidate && !usedOld.has(candidate) && _sameNodeType(candidate, newChild)) match = candidate;
+    } else if (oldCursor && initialOld.has(oldCursor) && !usedOld.has(oldCursor) && _nodeKey(oldCursor) == null && _sameNodeType(oldCursor, newChild)) {
+      match = oldCursor;
+    }
+    if (match) {
+      if (match !== oldCursor) parent.insertBefore(match, oldCursor);
+      _patchNode(match, newChild);
+      usedOld.add(match);
+      oldCursor = match.nextSibling;
+    } else {
+      parent.insertBefore(document.importNode(newChild, true), oldCursor);
+    }
+    newChild = nextNewChild;
+  }
+  for (const n of initialOld) {
+    if (!usedOld.has(n) && n.parentNode === parent) parent.removeChild(n);
+  }
+}
+function _morphInto(el, htmlStr) {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = htmlStr;
+  _morphChildren(el, tpl.content);
+}
+var _templateCache = /* @__PURE__ */ new WeakMap();
+function _classifySlotKinds(strings) {
+  const kinds = [];
+  let acc = "";
+  for (let i = 0; i < strings.length - 1; i++) {
+    acc += strings[i];
+    kinds.push(acc.lastIndexOf("<") > acc.lastIndexOf(">") ? "attr" : "child");
+  }
+  return kinds;
+}
+function _recordBindings(root) {
+  const bindings = [];
+  const walk = (node, path) => {
+    if (node.nodeType === 8) {
+      const m = /^@@h(\d+)@@$/.exec(node.data);
+      if (m) bindings.push({ path, kind: "child", index: Number(m[1]) });
+      return;
+    }
+    if (node.nodeType === 1) {
+      for (const a of [...node.attributes]) {
+        if (a.value.includes("@@h")) {
+          const slots = [...a.value.matchAll(/@@h(\d+)@@/g)].map((mm) => Number(mm[1]));
+          bindings.push({ path, kind: "attr", attrName: a.name, template: a.value, slots });
+        }
+      }
+    }
+    const kids = node.childNodes;
+    for (let i = 0; i < kids.length; i++) walk(kids[i], [...path, i]);
+  };
+  for (let i = 0; i < root.childNodes.length; i++) walk(root.childNodes[i], [i]);
+  return bindings;
+}
+function _compileTemplate(strings) {
+  let compiled = _templateCache.get(strings);
+  if (compiled) return compiled;
+  const kinds = _classifySlotKinds(strings);
+  let html2 = strings[0];
+  for (let i = 0; i < kinds.length; i++) {
+    html2 += kinds[i] === "child" ? `<!--@@h${i}@@-->` : `@@h${i}@@`;
+    html2 += strings[i + 1];
+  }
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html2;
+  compiled = { tpl, bindings: _recordBindings(tpl.content) };
+  _templateCache.set(strings, compiled);
+  return compiled;
+}
+function _resolvePath(root, path) {
+  let node = root;
+  for (const i of path) node = node.childNodes[i];
+  return node;
+}
+function _isComponentValue(v) {
+  return typeof v === "function" || v != null && typeof v === "object" && (v.__isComponent || v.__isTemplateResult || v.html != null || v.setup || v.children);
+}
+function _teardownForEntry(entry) {
+  entry.rowStop?.();
+  entry.tplState?.dispose?.();
+  for (const n of entry.nodes) n.parentNode?.removeChild(n);
+}
+function _teardownChildBinding(lb) {
+  lb.childStop?.();
+  lb.childStop = null;
+  if (lb.forMap) {
+    for (const entry of lb.forMap.values()) _teardownForEntry(entry);
+    lb.forMap = null;
+  }
+  for (const n of lb.owned) n.parentNode?.removeChild(n);
+  lb.owned = [];
+}
+function _renderForEntry(parent, entry, result) {
+  const swap = (newNodes) => {
+    if (entry.nodes.length) {
+      const anchor = entry.nodes[entry.nodes.length - 1].nextSibling;
+      for (const n of entry.nodes) n.parentNode?.removeChild(n);
+      for (const n of newNodes) parent.insertBefore(n, anchor);
+    }
+    entry.nodes = newNodes;
+  };
+  if (result?.__isTemplateResult) {
+    const { tpl, bindings } = _compileTemplate(result.strings);
+    if (!entry.tplState || entry.tplState.tpl !== tpl) {
+      entry.tplState?.dispose();
+      const root = tpl.content.cloneNode(true);
+      const liveBindings = bindings.map((b) => _instantiateBinding(root, b));
+      swap([...root.childNodes]);
+      entry.tplState = { tpl, liveBindings, dispose: () => liveBindings.forEach((b) => b.kind === "child" && _teardownChildBinding(b)) };
+    }
+    for (const b of entry.tplState.liveBindings) {
+      if (b.kind === "attr") _updateAttrBinding(b, result.values);
+      else _updateChildBinding(b, result.values);
+    }
+  } else {
+    const html2 = result == null ? "" : String(result);
+    if (entry.lastHtml !== html2) {
+      const t = document.createElement("template");
+      t.innerHTML = html2;
+      swap([...t.content.childNodes]);
+      entry.lastHtml = html2;
+    }
+  }
+}
+function _updateForBinding(lb, forVal) {
+  const { items, keyFn, render } = forVal;
+  if (lb.lastKind !== "for") {
+    _teardownChildBinding(lb);
+    lb.forMap = /* @__PURE__ */ new Map();
+    lb.forKeys = [];
+    lb.lastKind = "for";
+  }
+  const map = lb.forMap;
+  const parent = lb.marker.parentNode;
+  let sameShape = items.length === lb.forKeys.length;
+  if (sameShape) {
+    for (let i = 0; i < items.length; i++) {
+      if (keyFn(items[i], i) !== lb.forKeys[i]) {
+        sameShape = false;
+        break;
+      }
+    }
+  }
+  if (sameShape) {
+    for (let i = 0; i < items.length; i++) {
+      map.get(lb.forKeys[i]).itemSig.value = items[i];
+    }
+    return;
+  }
+  const usedKeys = /* @__PURE__ */ new Set();
+  const newKeys = new Array(items.length);
+  let cursor = lb.marker;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const key = keyFn(item, i);
+    newKeys[i] = key;
+    usedKeys.add(key);
+    let entry = map.get(key);
+    if (!entry) {
+      entry = { nodes: [], tplState: null, itemSig: signal(item), indexSig: signal(i), rowStop: null };
+      entry.rowStop = effect(() => _renderForEntry(parent, entry, render(entry.itemSig.value, entry.indexSig.value)));
+      map.set(key, entry);
+    } else {
+      batch(() => {
+        entry.indexSig.value = i;
+        entry.itemSig.value = item;
+      });
+    }
+    let after = cursor.nextSibling;
+    for (const n of entry.nodes) {
+      if (n !== after) parent.insertBefore(n, after);
+      after = n.nextSibling;
+    }
+    cursor = entry.nodes[entry.nodes.length - 1] ?? cursor;
+  }
+  for (const [key, entry] of map) {
+    if (!usedKeys.has(key)) {
+      _teardownForEntry(entry);
+      map.delete(key);
+    }
+  }
+  lb.forKeys = newKeys;
+}
+function _updateChildBinding(lb, values) {
+  const value = values[lb.index];
+  if (value?.__isFor) {
+    _updateForBinding(lb, value);
+    lb.lastValue = value;
+    return;
+  }
+  if (Object.is(value, lb.lastValue)) return;
+  lb.lastValue = value;
+  if (_isComponentValue(value)) {
+    _teardownChildBinding(lb);
+    const wrapper = document.createElement("span");
+    wrapper.style.display = "contents";
+    lb.marker.after(wrapper);
+    lb.childStop = mount(wrapper, () => typeof value === "function" ? value() : value);
+    lb.owned = [wrapper];
+    lb.lastKind = "component";
+    return;
+  }
+  if (value != null && typeof value === "object" && value.__trusted) {
+    _teardownChildBinding(lb);
+    const tpl = document.createElement("template");
+    tpl.innerHTML = value.value;
+    const nodes = [...tpl.content.childNodes];
+    lb.marker.after(...nodes);
+    lb.owned = nodes;
+    lb.lastKind = "trusted";
+    return;
+  }
+  const text2 = value == null ? "" : String(value);
+  if (lb.lastKind === "text" && lb.owned[0]) {
+    lb.owned[0].data = text2;
+    return;
+  }
+  _teardownChildBinding(lb);
+  const textNode = document.createTextNode(text2);
+  lb.marker.after(textNode);
+  lb.owned = [textNode];
+  lb.lastKind = "text";
+}
+function _updateAttrBinding(lb, values) {
+  let changed = false;
+  for (const slot of lb.slots) if (lb.lastValues[slot] !== values[slot]) changed = true;
+  if (!changed) return;
+  let out = lb.template;
+  for (const slot of lb.slots) {
+    lb.lastValues[slot] = values[slot];
+    out = out.split(`@@h${slot}@@`).join(values[slot] == null ? "" : String(values[slot]));
+  }
+  const tag = lb.el.tagName;
+  if (lb.attrName === "value" && (tag === "INPUT" || tag === "TEXTAREA")) {
+    if (lb.el !== document.activeElement && lb.el.value !== out) lb.el.value = out;
+    return;
+  }
+  if (lb.el.getAttribute(lb.attrName) !== out) lb.el.setAttribute(lb.attrName, out);
+}
+function _instantiateBinding(root, binding) {
+  const node = _resolvePath(root, binding.path);
+  if (binding.kind === "attr") {
+    return { kind: "attr", el: node, attrName: binding.attrName, template: binding.template, slots: binding.slots, lastValues: {} };
+  }
+  return { kind: "child", marker: node, index: binding.index, owned: [], lastValue: void 0, lastKind: null, childStop: null };
+}
+function _renderTemplateResult(el, result, prevState) {
+  const { tpl, bindings } = _compileTemplate(result.strings);
+  let state = prevState;
+  if (!state || state.tpl !== tpl) {
+    state?.dispose();
+    const root = tpl.content.cloneNode(true);
+    const liveBindings = bindings.map((b) => _instantiateBinding(root, b));
+    el.textContent = "";
+    el.appendChild(root);
+    state = { tpl, liveBindings, dispose: () => liveBindings.forEach((lb) => lb.kind === "child" && _teardownChildBinding(lb)) };
+  }
+  for (const lb of state.liveBindings) {
+    if (lb.kind === "attr") _updateAttrBinding(lb, result.values);
+    else _updateChildBinding(lb, result.values);
+  }
+  return state;
+}
 var mount = (el, component, { escape = true } = {}) => {
   let _everSetup = false, _lastCid, _setupCleanup = null, _childrenStop = null;
+  let _lastHtml;
+  let _tplState = null;
+  const _dropTplState = () => {
+    _tplState?.dispose();
+    _tplState = null;
+  };
   const stop = effect(() => {
     try {
       const restoreFocus = _captureFocus(el);
@@ -199,14 +635,32 @@ var mount = (el, component, { escape = true } = {}) => {
         _setupCleanup = null;
       }
       if (typeof r === "string") {
-        el.innerHTML = escape ? esc(r) : r;
+        _dropTplState();
+        if (escape) {
+          if (el.childNodes.length !== 1 || el.firstChild.nodeType !== 3) el.textContent = r;
+          else if (el.firstChild.data !== r) el.firstChild.data = r;
+        } else if (r !== _lastHtml) {
+          _morphInto(el, r);
+          _lastHtml = r;
+        }
       } else if (r?.__trusted) {
-        el.innerHTML = r.value;
+        _dropTplState();
+        if (r.value !== _lastHtml) {
+          _morphInto(el, r.value);
+          _lastHtml = r.value;
+        }
       } else if (r?.__bind) {
+        _dropTplState();
         r.render(el);
+      } else if (r?.__isTemplateResult) {
+        _tplState = _renderTemplateResult(el, r, _tplState);
       } else if (r && typeof r === "object") {
+        _dropTplState();
         const rawHtml = typeof r.html === "function" ? r.html() : r.html ?? r.render?.() ?? "";
-        el.innerHTML = rawHtml;
+        if (rawHtml !== _lastHtml) {
+          _morphInto(el, rawHtml);
+          _lastHtml = rawHtml;
+        }
         if (r.setup && isNewComponent) {
           _everSetup = true;
           const cleanup = r.setup(el);
@@ -221,6 +675,8 @@ var mount = (el, component, { escape = true } = {}) => {
           }
           _childrenStop = () => childStops.forEach((f) => f?.());
         }
+      } else {
+        _dropTplState();
       }
       if (cid !== void 0) _lastCid = cid;
       restoreFocus();
@@ -233,6 +689,7 @@ var mount = (el, component, { escape = true } = {}) => {
     stop();
     _setupCleanup?.();
     _childrenStop?.();
+    _dropTplState();
   };
 };
 var show = (cond, yes, no = "") => () => {
@@ -259,10 +716,12 @@ var delegate = /* @__PURE__ */ (() => {
     if (reg.has(evt)) return;
     reg.set(evt, []);
     document.addEventListener(evt, (e) => {
-      for (const [sel, fn] of reg.get(evt)) {
-        const t = e.target.closest(sel);
-        if (t) fn(e, t);
-      }
+      batch(() => {
+        for (const [sel, fn] of reg.get(evt)) {
+          const t = e.target.closest(sel);
+          if (t) fn(e, t);
+        }
+      });
     }, { capture: true });
   };
   return {
@@ -293,6 +752,7 @@ var keyedList = (itemsSig, renderItem, getKey = (i) => i.id ?? i.key, { escape =
       const live = new Set(items.map(getKey));
       for (const [key, el] of [...domMap]) {
         if (!live.has(key)) {
+          el.__tplState?.dispose?.();
           transitions.fadeOut(el).finished?.then(() => el.remove()) ?? el.remove();
           domMap.delete(key);
         }
@@ -301,17 +761,19 @@ var keyedList = (itemsSig, renderItem, getKey = (i) => i.id ?? i.key, { escape =
       for (const item of items) {
         const key = getKey(item);
         const raw = renderItem(item);
-        const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
         let el = domMap.get(key);
         if (!el) {
           el = document.createElement(tag);
           el.dataset.key = key;
-          el.innerHTML = h2;
           domMap.set(key, el);
           parentEl.appendChild(el);
           transitions.slideDown(el);
-        } else if (el.innerHTML !== h2) {
-          el.innerHTML = h2;
+        }
+        if (raw?.__isTemplateResult) {
+          el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
+        } else {
+          const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
+          if (el.innerHTML !== h2) el.innerHTML = h2;
         }
         if (prev) {
           const next = prev.nextSibling;
@@ -339,16 +801,23 @@ var virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5, { escape
     for (let i = start; i < end; i++) {
       const item = items[i], key = item.id ?? item.key ?? i;
       vis.add(key);
-      if (!rendered.has(key)) {
-        const el = document.createElement("div");
+      let el = rendered.get(key);
+      if (!el) {
+        el = document.createElement("div");
         Object.assign(el.style, { position: "absolute", top: `${i * itemHeight}px`, height: `${itemHeight}px`, width: "100%" });
-        const raw = renderItem(item);
-        el.innerHTML = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
         inner.appendChild(el);
         rendered.set(key, el);
       }
+      const raw = renderItem(item);
+      if (raw?.__isTemplateResult) {
+        el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
+      } else {
+        const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
+        if (el.innerHTML !== h2) el.innerHTML = h2;
+      }
     }
     for (const [k, el] of rendered) if (!vis.has(k)) {
+      el.__tplState?.dispose?.();
       el.remove();
       rendered.delete(k);
     }
@@ -428,26 +897,8 @@ var createRouter = (routes, { keepAlive = false } = {}) => {
     }
   };
 };
-var h = (strings, ...values) => {
-  let htmlStr = "";
-  const children = {};
-  let idx = 0;
-  strings.forEach((str, i) => {
-    htmlStr += str;
-    if (i < values.length) {
-      const val = values[i];
-      const isComp = val !== null && val !== void 0 && (typeof val === "function" || val?.__isComponent || typeof val === "object" && (val.html != null || val.setup || val.children));
-      if (isComp) {
-        const id = `__s${idx++}`;
-        htmlStr += `<span data-slot="${id}"></span>`;
-        children[`[data-slot="${id}"]`] = val;
-      } else {
-        htmlStr += esc(String(val ?? ""));
-      }
-    }
-  });
-  return Object.keys(children).length ? { html: htmlStr, children } : htmlStr;
-};
+var h = (strings, ...values) => ({ __isTemplateResult: true, strings, values });
+var For = (items, keyFn, render) => ({ __isFor: true, items, keyFn, render });
 var $ = (id) => document.getElementById(id);
 var $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 var on = (el, evt, fn, opts) => {
@@ -456,8 +907,18 @@ var on = (el, evt, fn, opts) => {
 };
 var once = (el, evt, fn) => on(el, evt, fn, { once: true });
 var nextTick = (fn) => Promise.resolve().then(fn);
+function _shallowEqualProps(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const ak = Object.keys(a), bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) if (!Object.is(a[k], b[k])) return false;
+  return true;
+}
 var defineComponent = (setup, { name } = {}) => {
+  let _cache = null;
   const factory = (props = {}) => {
+    if (_cache && _shallowEqualProps(_cache.props, props)) return _cache.instance;
     const stops = [], mountCbs = [], unmountCbs = [];
     const ctx = {
       signal: (v, opts) => signal(v, opts),
@@ -482,7 +943,7 @@ var defineComponent = (setup, { name } = {}) => {
       onUnmount: (fn) => unmountCbs.push(fn)
     };
     const renderFn = setup(props, ctx);
-    return {
+    const instance = {
       __isComponent: true,
       // Stable per-instance id so mount() can tell "same instance, revisited"
       // (skip setup) apart from "a different component swapped in" (run its
@@ -494,9 +955,12 @@ var defineComponent = (setup, { name } = {}) => {
         return () => {
           unmountCbs.forEach((fn) => fn());
           stops.forEach((s) => s());
+          if (_cache?.instance === instance) _cache = null;
         };
       }
     };
+    _cache = { props, instance };
+    return instance;
   };
   factory.displayName = name ?? setup.name ?? "Component";
   factory.__isComponent = true;
@@ -586,15 +1050,15 @@ var createResource = (source, fetcher) => {
     data.value = v;
   } }];
 };
-var createFetch = ({ cache = true, ttl = 3e4, retry = 2, retryDelay = 1e3, store = null } = {}) => {
+var createFetch = ({ cache = true, ttl = 3e4, retry = 2, retryDelay = 1e3, store: store2 = null } = {}) => {
   const _mem = /* @__PURE__ */ new Map();
   const cacheGet = async (key) => {
-    if (store) return store.get(key);
+    if (store2) return store2.get(key);
     const hit = _mem.get(key);
     return hit && Date.now() - hit.ts < ttl ? hit.data : void 0;
   };
   const cacheSet = async (key, data, t) => {
-    if (store) return store.set(key, data, { ttl: t });
+    if (store2) return store2.set(key, data, { ttl: t });
     _mem.set(key, { data, ts: Date.now() });
   };
   const get = async (key, fetcher, opts = {}) => {
@@ -613,7 +1077,7 @@ var createFetch = ({ cache = true, ttl = 3e4, retry = 2, retryDelay = 1e3, store
     return attempt(opts.retry ?? retry, retryDelay);
   };
   const invalidate = (key) => {
-    if (store) return key ? store.delete(key) : store.clear();
+    if (store2) return key ? store2.delete(key) : store2.clear();
     key ? _mem.delete(key) : _mem.clear();
   };
   return { get, invalidate };
@@ -721,6 +1185,7 @@ var idb = (dbName, storeName = "kv") => {
 export {
   $,
   $$,
+  For,
   animate,
   asyncEffect,
   attr,
@@ -738,6 +1203,8 @@ export {
   delegate,
   effect,
   esc,
+  flushSync,
+  getUpdateMode,
   h,
   html,
   idb,
@@ -748,8 +1215,10 @@ export {
   on,
   onCleanup,
   once,
+  setUpdateMode,
   show,
   signal,
+  store,
   text,
   throttle,
   transitions,

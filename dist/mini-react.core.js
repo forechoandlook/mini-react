@@ -7,6 +7,27 @@ var _tracking = null;
 var _batchDepth = 0;
 var _currCleanups = null;
 var _pending = /* @__PURE__ */ new Set();
+var _mode = "sync";
+var _microtaskFlushScheduled = false;
+var setUpdateMode = (mode) => {
+  if (mode !== "sync" && mode !== "microtask") throw new TypeError(`setUpdateMode: expected 'sync' or 'microtask', got ${mode}`);
+  _mode = mode;
+};
+var getUpdateMode = () => _mode;
+function _scheduleMicrotaskFlush() {
+  if (_microtaskFlushScheduled) return;
+  _microtaskFlushScheduled = true;
+  queueMicrotask(() => {
+    _microtaskFlushScheduled = false;
+    flushSync();
+  });
+}
+var flushSync = () => {
+  if (_pending.size === 0) return;
+  const q = [..._pending];
+  _pending.clear();
+  for (const f of q) f();
+};
 var Signal = class {
   constructor(v, eq) {
     this._v = v;
@@ -23,8 +44,9 @@ var Signal = class {
   set value(v) {
     if (this._eq(v, this._v)) return;
     this._v = v;
-    if (_batchDepth > 0) {
+    if (_batchDepth > 0 || _mode === "microtask") {
       for (const f of this._subs) _pending.add(f);
+      if (_mode === "microtask" && _batchDepth === 0) _scheduleMicrotaskFlush();
     } else {
       for (const f of [...this._subs]) f();
     }
@@ -94,9 +116,7 @@ var batch = (fn) => {
     fn();
   } finally {
     if (--_batchDepth === 0) {
-      const q = [..._pending];
-      _pending.clear();
-      for (const f of q) f();
+      flushSync();
     }
   }
 };
@@ -121,6 +141,98 @@ var asyncEffect = (fn) => effect(() => {
   });
   return () => ctrl.abort();
 });
+var _idxRe = /^\d+$/;
+var _structuralMethods = ["push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill", "copyWithin"];
+function _wrapRow(arr, index, rowCache) {
+  let entry = rowCache.get(index);
+  if (entry) return entry.proxy;
+  const fields = /* @__PURE__ */ new Map();
+  const fieldSignal = (prop) => {
+    let s = fields.get(prop);
+    if (!s) {
+      s = new Signal(arr[index]?.[prop]);
+      fields.set(prop, s);
+    }
+    return s;
+  };
+  const proxy = new Proxy({}, {
+    get(_, prop) {
+      if (typeof prop === "symbol") return arr[index]?.[prop];
+      return fieldSignal(prop).value;
+    },
+    set(_, prop, value) {
+      const target = arr[index];
+      if (target) target[prop] = value;
+      fieldSignal(prop).value = value;
+      return true;
+    },
+    has(_, prop) {
+      return arr[index] != null && prop in arr[index];
+    },
+    ownKeys() {
+      return arr[index] ? Reflect.ownKeys(arr[index]) : [];
+    },
+    getOwnPropertyDescriptor(_, prop) {
+      const target = arr[index];
+      if (!target || !(prop in target)) return void 0;
+      return { enumerable: true, configurable: true, value: fieldSignal(prop).value };
+    }
+  });
+  rowCache.set(index, { proxy });
+  return proxy;
+}
+var store = (initial) => {
+  if (!Array.isArray(initial)) throw new TypeError("store() currently only supports arrays");
+  const arr = initial;
+  const structural = new Signal(0, () => false);
+  const rowCache = /* @__PURE__ */ new Map();
+  const bump = () => {
+    structural.value = structural._v + 1;
+  };
+  return new Proxy(arr, {
+    get(target, prop, receiver) {
+      if (prop === "length") {
+        structural.value;
+        return target.length;
+      }
+      if (typeof prop === "string" && _idxRe.test(prop)) {
+        structural.value;
+        const idx = Number(prop);
+        return idx < target.length ? _wrapRow(target, idx, rowCache) : void 0;
+      }
+      if (prop === Symbol.iterator) {
+        return function* () {
+          structural.value;
+          for (let i = 0; i < target.length; i++) yield _wrapRow(target, i, rowCache);
+        };
+      }
+      if (_structuralMethods.includes(prop)) {
+        return (...args) => {
+          rowCache.clear();
+          const res = Array.prototype[prop].apply(target, args);
+          bump();
+          return res;
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+    set(target, prop, value) {
+      if (typeof prop === "string" && _idxRe.test(prop)) {
+        target[Number(prop)] = value;
+        rowCache.delete(Number(prop));
+        bump();
+        return true;
+      }
+      if (prop === "length") {
+        target.length = value;
+        rowCache.clear();
+        bump();
+        return true;
+      }
+      return Reflect.set(target, prop, value);
+    }
+  });
+};
 var _escMap = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
 var esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => _escMap[c]);
 var html = (s) => ({ __trusted: true, value: String(s ?? "") });
@@ -130,9 +242,13 @@ export {
   computed,
   effect,
   esc,
+  flushSync,
+  getUpdateMode,
   html,
   onCleanup,
+  setUpdateMode,
   signal,
+  store,
   version,
   watch
 };
