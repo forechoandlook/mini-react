@@ -41,15 +41,16 @@ count.value += 1; // DOM is updated synchronously
 
 ## Optional CSS
 
-The CSS is opt-in and scoped under `.mr-root`, with no global reset. It includes
-tokens, layout helpers, cards, buttons, form fields, badges, alerts and a spinner.
+The CSS is opt-in and scoped under `.mr-root`, with no global reset. Its primary
+API is composable utilities (`mr-flex`, `mr-gap-2`, `mr-p-4`, `mr-bg-soft`, ...),
+plus optional ready-made card/button/form classes.
 
 ```html
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/forechoandlook/mini-react@latest/dist/mini-react.min.css">
-<main class="mr-root mr-auto-dark mr-stack">
-  <section class="mr-card mr-stack-sm">
-    <label class="mr-field"><span class="mr-label">Name</span><input class="mr-input"></label>
-    <button class="mr-btn">Save</button>
+<main class="mr-root mr-auto-dark mr-min-h-screen mr-bg-soft mr-p-4">
+  <section class="mr-flex mr-flex-col mr-gap-3 mr-p-4 mr-bg-base mr-border mr-rounded-md mr-shadow">
+    <label class="mr-flex mr-flex-col mr-gap-1 mr-font-semibold">Name <input class="mr-input"></label>
+    <button class="mr-btn mr-w-full">Save</button>
   </section>
 </main>
 ```
