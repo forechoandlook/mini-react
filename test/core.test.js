@@ -52,10 +52,13 @@ describe('computed', () => {
     const a = signal(1);
     let runs = 0;
     const c = computed(() => { runs++; return a.value; });
+    assert.equal(runs, 0, 'computed 在首次读取前不应执行');
+    assert.equal(c.value, 1);
     assert.equal(runs, 1);
     a.value = 1; // 相等，跳过
     assert.equal(runs, 1);
     a.value = 2;
+    assert.equal(c.value, 2);
     assert.equal(runs, 2);
   });
 
@@ -66,6 +69,17 @@ describe('computed', () => {
     assert.equal(c.value, 4);
     a.value = 2;
     assert.equal(c.value, 6);
+  });
+
+  it('惰性 computed 可以 dispose，之后不再订阅源信号', () => {
+    const a = signal(1);
+    let runs = 0;
+    const c = computed(() => { runs++; return a.value * 2; });
+    assert.equal(c.value, 2);
+    c.dispose();
+    a.value = 2;
+    assert.equal(c.value, 2);
+    assert.equal(runs, 1);
   });
 });
 

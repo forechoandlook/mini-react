@@ -1,4 +1,4 @@
-/* mini-react/dom v0.1.7 | https://github.com/forechoandlook/mini-react */
+/* mini-react/dom v0.1.8 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
 var _eff = null;
@@ -8,6 +8,13 @@ var _currCleanups = null;
 var _pendingComputed = /* @__PURE__ */ new Set();
 var _pendingEffects = /* @__PURE__ */ new Set();
 var _isFlushing = false;
+var _maxFlushRuns = 1e4;
+var _schedulerStats = { flushes: 0, runs: 0, lastFlushRuns: 0 };
+var setSchedulerMaxRuns = (n) => {
+  if (!Number.isInteger(n) || n < 1) throw new TypeError("setSchedulerMaxRuns: expected a positive integer");
+  _maxFlushRuns = n;
+};
+var getSchedulerStats = () => ({ ..._schedulerStats, maxRuns: _maxFlushRuns });
 var _mode = "sync";
 var _microtaskFlushScheduled = false;
 var setUpdateMode = (mode) => {
@@ -26,20 +33,30 @@ function _scheduleMicrotaskFlush() {
 var flushSync = () => {
   if (_isFlushing) return;
   _isFlushing = true;
+  let runs = 0;
+  _schedulerStats.flushes++;
   try {
     while (_pendingComputed.size || _pendingEffects.size) {
       while (_pendingComputed.size) {
         const f = _pendingComputed.values().next().value;
         _pendingComputed.delete(f);
+        if (++runs > _maxFlushRuns) throw new Error(`mini-react: reactive update loop exceeded ${_maxFlushRuns} runs`);
         f();
       }
       if (_pendingEffects.size) {
         const f = _pendingEffects.values().next().value;
         _pendingEffects.delete(f);
+        if (++runs > _maxFlushRuns) throw new Error(`mini-react: reactive update loop exceeded ${_maxFlushRuns} runs`);
         f();
       }
     }
   } finally {
+    _schedulerStats.runs += runs;
+    _schedulerStats.lastFlushRuns = runs;
+    if (runs > _maxFlushRuns) {
+      _pendingComputed.clear();
+      _pendingEffects.clear();
+    }
     _isFlushing = false;
   }
 };
@@ -94,19 +111,43 @@ function _run(fn, runner, deps, cleanups) {
 }
 var computed = (fn) => {
   const s = new Signal(void 0), deps = /* @__PURE__ */ new Set();
-  const run = () => {
+  let dirty = true, disposed = false;
+  const mark = () => {
+    if (dirty || disposed) return;
+    dirty = true;
+    _notify(s._subs);
+  };
+  mark._isComputed = true;
+  const read = () => {
+    if (!dirty || disposed) return s._v;
+    dirty = false;
     try {
-      const v = _run(fn, run, deps, null);
-      if (v !== s._v) {
-        s._v = v;
-        _notify(s._subs);
-      }
+      const v = _run(fn, mark, deps, null);
+      if (v !== s._v) s._v = v;
     } catch (e) {
+      dirty = true;
       console.error("[computed]", e);
     }
+    return s._v;
   };
-  run._isComputed = true;
-  run();
+  Object.defineProperty(s, "value", {
+    get() {
+      if (_eff) {
+        s._subs.add(_eff);
+        _tracking?.add(s);
+      }
+      return read();
+    },
+    set() {
+      throw new TypeError("Cannot assign to a computed signal");
+    }
+  });
+  s.dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    for (const d of deps) d._subs.delete(mark);
+    deps.clear();
+  };
   return s;
 };
 var effect = (fn) => {
@@ -384,6 +425,27 @@ function _morphInto(el, htmlStr) {
   _morphChildren(el, tpl.content);
 }
 var _templateCache = /* @__PURE__ */ new WeakMap();
+var _urlAttributes = /* @__PURE__ */ new Set(["action", "formaction", "href", "src", "xlink:href"]);
+function _validateTemplateBindings(bindings, slotCount) {
+  const seen = /* @__PURE__ */ new Set();
+  for (const binding of bindings) {
+    if (binding.kind === "attr") {
+      const name = binding.attrName.toLowerCase();
+      if (name.startsWith("on") || name === "srcdoc") {
+        throw new TypeError(`h: dynamic ${binding.attrName} attributes are not allowed; attach events with on()/delegate.on()`);
+      }
+      for (const slot of binding.slots) seen.add(slot);
+    } else seen.add(binding.index);
+  }
+  if (seen.size !== slotCount || [...seen].some((i) => i < 0 || i >= slotCount)) {
+    throw new TypeError("h: every interpolation must be a complete child or attribute value");
+  }
+}
+function _safeAttributeValue(name, value) {
+  if (!_urlAttributes.has(name.toLowerCase())) return value;
+  const normalized = String(value).replace(/[\u0000-\u0020]/g, "").toLowerCase();
+  return normalized.startsWith("javascript:") || normalized.startsWith("vbscript:") || normalized.startsWith("data:text/html") ? null : value;
+}
 function _classifySlotKinds(strings) {
   const kinds = [];
   let acc = "";
@@ -426,7 +488,9 @@ function _compileTemplate(strings) {
   }
   const tpl = document.createElement("template");
   tpl.innerHTML = html2;
-  compiled = { tpl, bindings: _recordBindings(tpl.content) };
+  const bindings = _recordBindings(tpl.content);
+  _validateTemplateBindings(bindings, strings.length - 1);
+  compiled = { tpl, bindings };
   _templateCache.set(strings, compiled);
   return compiled;
 }
@@ -592,6 +656,11 @@ function _updateAttrBinding(lb, values) {
   for (const slot of lb.slots) {
     lb.lastValues[slot] = values[slot];
     out = out.split(`@@h${slot}@@`).join(values[slot] == null ? "" : String(values[slot]));
+  }
+  out = _safeAttributeValue(lb.attrName, out);
+  if (out == null) {
+    lb.el.removeAttribute(lb.attrName);
+    return;
   }
   const tag = lb.el.tagName;
   if (lb.attrName === "value" && (tag === "INPUT" || tag === "TEXTAREA")) {
@@ -803,55 +872,70 @@ var virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5, { escape
   inner.style.position = "relative";
   wrap.appendChild(inner);
   const rendered = /* @__PURE__ */ new Map();
-  const update = () => {
-    const items = itemsSig.value;
+  const disposeRow = (entry) => {
+    entry.stop();
+    entry.el.__tplState?.dispose?.();
+    entry.el.remove();
+  };
+  const renderRow = (entry) => {
+    const raw = renderItem(entry.item.value, entry.index.value);
+    const el = entry.el;
+    if (raw?.__isTemplateResult) el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
+    else {
+      const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
+      if (el.innerHTML !== h2) el.innerHTML = h2;
+    }
+  };
+  const update = (track = false) => {
+    const items = track ? itemsSig.value : itemsSig.peek();
     const start = Math.max(0, Math.floor(wrap.scrollTop / itemHeight) - overscan);
     const end = Math.min(items.length, Math.ceil((wrap.scrollTop + wrap.clientHeight) / itemHeight) + overscan);
     const vis = /* @__PURE__ */ new Set();
     for (let i = start; i < end; i++) {
       const item = items[i], key = item.id ?? item.key ?? i;
       vis.add(key);
-      let el = rendered.get(key);
-      if (!el) {
-        el = document.createElement("div");
+      let entry = rendered.get(key);
+      if (!entry) {
+        const el = document.createElement("div");
         Object.assign(el.style, { position: "absolute", top: `${i * itemHeight}px`, height: `${itemHeight}px`, width: "100%" });
+        entry = { el, item: signal(item), index: signal(i), stop: null };
+        entry.stop = effect(() => renderRow(entry));
         inner.appendChild(el);
-        rendered.set(key, el);
-      }
-      const raw = renderItem(item);
-      if (raw?.__isTemplateResult) {
-        el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
+        rendered.set(key, entry);
       } else {
-        const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
-        if (el.innerHTML !== h2) el.innerHTML = h2;
+        batch(() => {
+          entry.item.value = item;
+          entry.index.value = i;
+        });
       }
+      entry.el.style.top = `${i * itemHeight}px`;
     }
-    for (const [k, el] of rendered) if (!vis.has(k)) {
-      el.__tplState?.dispose?.();
-      el.remove();
+    for (const [k, entry] of rendered) if (!vis.has(k)) {
+      disposeRow(entry);
       rendered.delete(k);
     }
     inner.style.height = `${items.length * itemHeight}px`;
   };
-  wrap.addEventListener("scroll", update, { passive: true });
-  const stopEffect = effect(() => {
-    itemsSig.value;
-    update();
-  });
+  const onScroll = () => update(false);
+  wrap.addEventListener("scroll", onScroll, { passive: true });
+  const stopEffect = effect(() => update(true));
   return {
     el: wrap,
     dispose: () => {
+      for (const entry of rendered.values()) disposeRow(entry);
       rendered.clear();
-      wrap.removeEventListener("scroll", update);
+      wrap.removeEventListener("scroll", onScroll);
       stopEffect();
     }
   };
 };
 var createRouter = (routes, { keepAlive = false } = {}) => {
   const current = signal(location.hash.slice(1) || "/");
-  window.addEventListener("hashchange", () => {
+  let disposed = false;
+  const onHashChange = () => {
     current.value = location.hash.slice(1) || "/";
-  });
+  };
+  window.addEventListener("hashchange", onHashChange);
   const cache = keepAlive ? /* @__PURE__ */ new Map() : null;
   const resolve = (key, factory) => {
     if (!keepAlive) return factory();
@@ -860,35 +944,31 @@ var createRouter = (routes, { keepAlive = false } = {}) => {
     cache.set(key, inst);
     return inst;
   };
-  const route = (() => {
-    const s = signal(void 0);
-    const run = () => {
-      const path = current.value;
-      for (const [pat, comp] of Object.entries(routes)) {
-        if (pat === "*") continue;
-        const regex = new RegExp("^" + pat.replace(/:\w+/g, "([^/]+)") + "$");
-        const m = path.match(regex);
-        if (m) {
-          const params = m.slice(1);
-          s.value = typeof comp === "function" ? resolve(`${pat}|${params.join("/")}`, () => comp(...params)) : comp;
-          return;
-        }
-      }
-      if (routes["*"]) {
-        const c = routes["*"];
-        s.value = typeof c === "function" ? resolve("*", c) : c;
+  const route = signal(void 0);
+  const stopRoute = effect(() => {
+    const path = current.value;
+    for (const [pat, comp] of Object.entries(routes)) {
+      if (pat === "*") continue;
+      const regex = new RegExp("^" + pat.replace(/:\w+/g, "([^/]+)") + "$");
+      const m = path.match(regex);
+      if (m) {
+        const params = m.slice(1);
+        route.value = typeof comp === "function" ? resolve(`${pat}|${params.join("/")}`, () => comp(...params)) : comp;
         return;
       }
-      s.value = null;
-    };
-    effect(run);
-    return s;
-  })();
+    }
+    if (routes["*"]) {
+      const c = routes["*"];
+      route.value = typeof c === "function" ? resolve("*", c) : c;
+      return;
+    }
+    route.value = null;
+  });
   return {
     current,
     route,
     navigate: (path) => {
-      location.hash = path;
+      if (!disposed) location.hash = path;
     },
     match: (pat) => {
       const m = current.value.match(new RegExp("^" + pat.replace(/:\w+/g, "([^/]+)") + "$"));
@@ -904,6 +984,13 @@ var createRouter = (routes, { keepAlive = false } = {}) => {
         return;
       }
       for (const k of [...cache.keys()]) if (k === pattern || k.startsWith(`${pattern}|`)) cache.delete(k);
+    },
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      window.removeEventListener("hashchange", onHashChange);
+      stopRoute();
+      cache?.clear();
     }
   };
 };
@@ -1037,6 +1124,7 @@ export {
   effect,
   esc,
   flushSync,
+  getSchedulerStats,
   getUpdateMode,
   h,
   html,
@@ -1046,6 +1134,7 @@ export {
   on,
   onCleanup,
   once,
+  setSchedulerMaxRuns,
   setUpdateMode,
   show,
   signal,

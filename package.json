@@ -1,6 +1,6 @@
 {
   "name": "mini-react",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
@@ -12,9 +12,9 @@
   },
   "license": "ISC",
   "devDependencies": {
-    "happy-dom": "^20.9.0"
+    "happy-dom": "^20.11.2"
   },
   "dependencies": {
-    "esbuild": "^0.28.0"
+    "esbuild": "^0.28.2"
   }
 }

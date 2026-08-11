@@ -8,6 +8,17 @@ let _eff = null, _tracking = null, _batchDepth = 0, _currCleanups = null;
 // phase while preserving synchronous updates by default.
 const _pendingComputed = new Set(), _pendingEffects = new Set();
 let _isFlushing = false;
+let _maxFlushRuns = 10_000;
+const _schedulerStats = { flushes: 0, runs: 0, lastFlushRuns: 0 };
+
+// Diagnostics are intentionally pull-based so production applications do not
+// pay for logging on every update. Lower the limit in tests or development to
+// turn accidental self-updating effects into a deterministic failure.
+export const setSchedulerMaxRuns = n => {
+  if (!Number.isInteger(n) || n < 1) throw new TypeError('setSchedulerMaxRuns: expected a positive integer');
+  _maxFlushRuns = n;
+};
+export const getSchedulerStats = () => ({ ..._schedulerStats, maxRuns: _maxFlushRuns });
 
 // ── Update mode ──────────────────────────────────────────────────────────────
 // 'sync' (default): every write reruns its subscribers immediately, in the
@@ -47,6 +58,8 @@ function _scheduleMicrotaskFlush() {
 export const flushSync = () => {
   if (_isFlushing) return;
   _isFlushing = true;
+  let runs = 0;
+  _schedulerStats.flushes++;
   try {
     // Take one effect at a time so a write from it can settle all affected
     // computeds before the next effect observes application state.
@@ -54,15 +67,20 @@ export const flushSync = () => {
       while (_pendingComputed.size) {
         const f = _pendingComputed.values().next().value;
         _pendingComputed.delete(f);
+        if (++runs > _maxFlushRuns) throw new Error(`mini-react: reactive update loop exceeded ${_maxFlushRuns} runs`);
         f();
       }
       if (_pendingEffects.size) {
         const f = _pendingEffects.values().next().value;
         _pendingEffects.delete(f);
+        if (++runs > _maxFlushRuns) throw new Error(`mini-react: reactive update loop exceeded ${_maxFlushRuns} runs`);
         f();
       }
     }
   } finally {
+    _schedulerStats.runs += runs;
+    _schedulerStats.lastFlushRuns = runs;
+    if (runs > _maxFlushRuns) { _pendingComputed.clear(); _pendingEffects.clear(); }
     _isFlushing = false;
   }
 };
@@ -111,14 +129,42 @@ function _run(fn, runner, deps, cleanups) {
 
 export const computed = fn => {
   const s = new Signal(undefined), deps = new Set();
-  const run = () => {
-    try {
-      const v = _run(fn, run, deps, null);
-      if (v !== s._v) { s._v = v; _notify(s._subs); }
-    } catch (e) { console.error('[computed]', e); }
+  let dirty = true, disposed = false;
+  // Dependencies subscribe to this marker rather than eagerly rerunning the
+  // derivation. It marks the value stale and propagates that staleness; the
+  // next actual read computes once. This removes unused computed work and
+  // gives callers an explicit lifecycle hook for temporary derivations.
+  const mark = () => {
+    if (dirty || disposed) return;
+    dirty = true;
+    _notify(s._subs);
   };
-  run._isComputed = true;
-  run();
+  mark._isComputed = true;
+  const read = () => {
+    if (!dirty || disposed) return s._v;
+    dirty = false;
+    try {
+      const v = _run(fn, mark, deps, null);
+      // mark() already notified downstream readers when dependencies changed.
+      // Notifying again here would enqueue the effect currently reading this
+      // lazy value and make it run twice.
+      if (v !== s._v) s._v = v;
+    } catch (e) { dirty = true; console.error('[computed]', e); }
+    return s._v;
+  };
+  Object.defineProperty(s, 'value', {
+    get() {
+      if (_eff) { s._subs.add(_eff); _tracking?.add(s); }
+      return read();
+    },
+    set() { throw new TypeError('Cannot assign to a computed signal'); },
+  });
+  s.dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    for (const d of deps) d._subs.delete(mark);
+    deps.clear();
+  };
   return s;
 };
 

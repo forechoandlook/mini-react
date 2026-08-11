@@ -69,6 +69,23 @@ describe('h`` compiled templates — instantiate once, patch in place', () => {
     assert.equal(x2.getAttribute('data-runtime'), 'user-set');
   });
 
+  it('危险 URL 属性会被移除，动态事件属性会被拒绝', () => {
+    const url = signal('javascript:alert(1)');
+    const d = div();
+    mount(d, () => h`<a id="link" href="${url.value}">safe label</a>`);
+    assert.equal(d.querySelector('#link').getAttribute('href'), null);
+
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      const bad = div();
+      mount(bad, () => h`<button onclick="${'alert(1)'}">bad</button>`);
+      assert.ok(bad.textContent.includes('Render error'));
+    } finally {
+      console.error = originalError;
+    }
+  });
+
   it('value 属性走 DOM property，且聚焦时不会打断用户输入', () => {
     const val = signal('a');
     const d = div();

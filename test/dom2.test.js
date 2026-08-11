@@ -259,6 +259,15 @@ describe('createRouter', () => {
     router.current.value = '/p';
     assert.equal(calls, 2);
   });
+
+  it('dispose 后停止路由 effect', () => {
+    const router = createRouter({ '/a': () => 'a', '/b': () => 'b' });
+    router.current.value = '/a';
+    assert.equal(router.route.value, 'a');
+    router.dispose();
+    router.current.value = '/b';
+    assert.equal(router.route.value, 'a');
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

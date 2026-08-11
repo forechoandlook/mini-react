@@ -108,10 +108,11 @@ describe('computed — 菱形依赖', () => {
     const c = computed(() => a.value * 2);
     let dRuns = 0;
     const d = computed(() => { dRuns++; return b.value + c.value; });
+    assert.equal(d.value, 4); // establish the dependency graph lazily
     dRuns = 0;
     batch(() => { a.value = 3; });
-    assert.equal(dRuns, 1);
     assert.equal(d.value, 10); // 结果正确
+    assert.equal(dRuns, 1);
   });
 
   it('先创建的 effect 也只会看到已结算的 computed 值一次', () => {

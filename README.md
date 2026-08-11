@@ -22,6 +22,8 @@ count.value += 1; // DOM is updated synchronously
   `setUpdateMode('microtask')`
 - deduplicated derived updates: a signal dependency diamond settles all
   `computed` values before dependent effects run
+- lazy `computed` values can be released with `.dispose()`; scheduler
+  diagnostics are available through `getSchedulerStats()`
 - `mount`, `h```, `For`, `show`, keyed lists, virtual lists and DOM morphing
 - `store(array)` for per-field list reactivity
 - stateful `defineComponent`, hash routing and event delegation

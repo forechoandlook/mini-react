@@ -1,4 +1,4 @@
-/* mini-react/data v0.1.7 | https://github.com/forechoandlook/mini-react */
+/* mini-react/data v0.1.8 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
 var _eff = null;
@@ -8,6 +8,8 @@ var _currCleanups = null;
 var _pendingComputed = /* @__PURE__ */ new Set();
 var _pendingEffects = /* @__PURE__ */ new Set();
 var _isFlushing = false;
+var _maxFlushRuns = 1e4;
+var _schedulerStats = { flushes: 0, runs: 0, lastFlushRuns: 0 };
 var _mode = "sync";
 var _microtaskFlushScheduled = false;
 function _scheduleMicrotaskFlush() {
@@ -21,20 +23,30 @@ function _scheduleMicrotaskFlush() {
 var flushSync = () => {
   if (_isFlushing) return;
   _isFlushing = true;
+  let runs = 0;
+  _schedulerStats.flushes++;
   try {
     while (_pendingComputed.size || _pendingEffects.size) {
       while (_pendingComputed.size) {
         const f = _pendingComputed.values().next().value;
         _pendingComputed.delete(f);
+        if (++runs > _maxFlushRuns) throw new Error(`mini-react: reactive update loop exceeded ${_maxFlushRuns} runs`);
         f();
       }
       if (_pendingEffects.size) {
         const f = _pendingEffects.values().next().value;
         _pendingEffects.delete(f);
+        if (++runs > _maxFlushRuns) throw new Error(`mini-react: reactive update loop exceeded ${_maxFlushRuns} runs`);
         f();
       }
     }
   } finally {
+    _schedulerStats.runs += runs;
+    _schedulerStats.lastFlushRuns = runs;
+    if (runs > _maxFlushRuns) {
+      _pendingComputed.clear();
+      _pendingEffects.clear();
+    }
     _isFlushing = false;
   }
 };
@@ -89,19 +101,43 @@ function _run(fn, runner, deps, cleanups) {
 }
 var computed = (fn) => {
   const s = new Signal(void 0), deps = /* @__PURE__ */ new Set();
-  const run = () => {
+  let dirty = true, disposed = false;
+  const mark = () => {
+    if (dirty || disposed) return;
+    dirty = true;
+    _notify(s._subs);
+  };
+  mark._isComputed = true;
+  const read = () => {
+    if (!dirty || disposed) return s._v;
+    dirty = false;
     try {
-      const v = _run(fn, run, deps, null);
-      if (v !== s._v) {
-        s._v = v;
-        _notify(s._subs);
-      }
+      const v = _run(fn, mark, deps, null);
+      if (v !== s._v) s._v = v;
     } catch (e) {
+      dirty = true;
       console.error("[computed]", e);
     }
+    return s._v;
   };
-  run._isComputed = true;
-  run();
+  Object.defineProperty(s, "value", {
+    get() {
+      if (_eff) {
+        s._subs.add(_eff);
+        _tracking?.add(s);
+      }
+      return read();
+    },
+    set() {
+      throw new TypeError("Cannot assign to a computed signal");
+    }
+  });
+  s.dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    for (const d of deps) d._subs.delete(mark);
+    deps.clear();
+  };
   return s;
 };
 var effect = (fn) => {

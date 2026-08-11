@@ -1,4 +1,4 @@
-export { signal, computed, effect, batch, watch, onCleanup, esc, html, store, setUpdateMode, getUpdateMode, flushSync } from './core.js';
+export { signal, computed, effect, batch, watch, onCleanup, esc, html, store, setUpdateMode, getUpdateMode, flushSync, setSchedulerMaxRuns, getSchedulerStats } from './core.js';
 import { signal, computed, effect, batch, esc } from './core.js';
 
 // ── Bind descriptors ──────────────────────────────────────────────────────────
@@ -197,6 +197,32 @@ function _morphInto(el, htmlStr) {
 // done by scanning the static text for an unclosed `<` — a literal `<`/`>`
 // in text content (not as a tag) will confuse it. Use `&lt;`/`&gt;` there.
 const _templateCache = new WeakMap(); // strings array -> { tpl, bindings }
+const _urlAttributes = new Set(['action', 'formaction', 'href', 'src', 'xlink:href']);
+
+function _validateTemplateBindings(bindings, slotCount) {
+  const seen = new Set();
+  for (const binding of bindings) {
+    if (binding.kind === 'attr') {
+      const name = binding.attrName.toLowerCase();
+      if (name.startsWith('on') || name === 'srcdoc') {
+        throw new TypeError(`h: dynamic ${binding.attrName} attributes are not allowed; attach events with on()/delegate.on()`);
+      }
+      for (const slot of binding.slots) seen.add(slot);
+    } else seen.add(binding.index);
+  }
+  if (seen.size !== slotCount || [...seen].some(i => i < 0 || i >= slotCount)) {
+    throw new TypeError('h: every interpolation must be a complete child or attribute value');
+  }
+}
+
+function _safeAttributeValue(name, value) {
+  if (!_urlAttributes.has(name.toLowerCase())) return value;
+  // Remove whitespace/control characters before checking the scheme: browsers
+  // accept variants such as "java\nscript:" in URL attributes.
+  const normalized = String(value).replace(/[\u0000-\u0020]/g, '').toLowerCase();
+  return normalized.startsWith('javascript:') || normalized.startsWith('vbscript:') || normalized.startsWith('data:text/html')
+    ? null : value;
+}
 
 function _classifySlotKinds(strings) {
   const kinds = [];
@@ -242,7 +268,9 @@ function _compileTemplate(strings) {
   }
   const tpl = document.createElement('template');
   tpl.innerHTML = html;
-  compiled = { tpl, bindings: _recordBindings(tpl.content) };
+  const bindings = _recordBindings(tpl.content);
+  _validateTemplateBindings(bindings, strings.length - 1);
+  compiled = { tpl, bindings };
   _templateCache.set(strings, compiled);
   return compiled;
 }
@@ -438,6 +466,8 @@ function _updateAttrBinding(lb, values) {
     lb.lastValues[slot] = values[slot];
     out = out.split(`@@h${slot}@@`).join(values[slot] == null ? '' : String(values[slot]));
   }
+  out = _safeAttributeValue(lb.attrName, out);
+  if (out == null) { lb.el.removeAttribute(lb.attrName); return; }
   const tag = lb.el.tagName;
   if (lb.attrName === 'value' && (tag === 'INPUT' || tag === 'TEXTAREA')) {
     if (lb.el !== document.activeElement && lb.el.value !== out) lb.el.value = out;
@@ -675,37 +705,57 @@ export const virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5,
   inner.style.position = 'relative';
   wrap.appendChild(inner);
   const rendered = new Map();
-  const update = () => {
-    const items = itemsSig.value;
+  const disposeRow = entry => {
+    entry.stop();
+    entry.el.__tplState?.dispose?.();
+    entry.el.remove();
+  };
+  const renderRow = entry => {
+    const raw = renderItem(entry.item.value, entry.index.value);
+    const el = entry.el;
+    if (raw?.__isTemplateResult) el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
+    else {
+      const h = escape && typeof raw === 'string' && !raw?.__trusted ? esc(raw) : (raw?.value ?? raw);
+      if (el.innerHTML !== h) el.innerHTML = h;
+    }
+  };
+  const update = (track = false) => {
+    const items = track ? itemsSig.value : itemsSig.peek();
     const start = Math.max(0, Math.floor(wrap.scrollTop / itemHeight) - overscan);
     const end   = Math.min(items.length, Math.ceil((wrap.scrollTop + wrap.clientHeight) / itemHeight) + overscan);
     const vis   = new Set();
     for (let i = start; i < end; i++) {
       const item = items[i], key = item.id ?? item.key ?? i;
       vis.add(key);
-      let el = rendered.get(key);
-      if (!el) {
-        el = document.createElement('div');
+      let entry = rendered.get(key);
+      if (!entry) {
+        const el = document.createElement('div');
         Object.assign(el.style, { position:'absolute', top:`${i*itemHeight}px`, height:`${itemHeight}px`, width:'100%' });
-        inner.appendChild(el); rendered.set(key, el);
-      }
-      const raw = renderItem(item);
-      if (raw?.__isTemplateResult) {
-        el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
+        entry = { el, item: signal(item), index: signal(i), stop: null };
+        entry.stop = effect(() => renderRow(entry));
+        inner.appendChild(el); rendered.set(key, entry);
       } else {
-        const h = escape && typeof raw === 'string' && !raw?.__trusted ? esc(raw) : (raw?.value ?? raw);
-        if (el.innerHTML !== h) el.innerHTML = h;
+        batch(() => { entry.item.value = item; entry.index.value = i; });
       }
+      entry.el.style.top = `${i * itemHeight}px`;
     }
-    for (const [k, el] of rendered) if (!vis.has(k)) { el.__tplState?.dispose?.(); el.remove(); rendered.delete(k); }
+    for (const [k, entry] of rendered) if (!vis.has(k)) { disposeRow(entry); rendered.delete(k); }
     inner.style.height = `${items.length * itemHeight}px`;
   };
-  wrap.addEventListener('scroll', update, { passive: true });
-  // Fix: capture stopEffect so dispose can fully clean up
-  const stopEffect = effect(() => { itemsSig.value; update(); });
+  const onScroll = () => update(false);
+  wrap.addEventListener('scroll', onScroll, { passive: true });
+  // The list effect tracks shape/replacements; each visible row has its own
+  // effect scope, so a store() field write updates that row only, even after
+  // scrolling it into view.
+  const stopEffect = effect(() => update(true));
   return {
     el: wrap,
-    dispose: () => { rendered.clear(); wrap.removeEventListener('scroll', update); stopEffect(); },
+    dispose: () => {
+      for (const entry of rendered.values()) disposeRow(entry);
+      rendered.clear();
+      wrap.removeEventListener('scroll', onScroll);
+      stopEffect();
+    },
   };
 };
 
@@ -723,7 +773,9 @@ export const virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5,
 // never re-run for a *different* component swapped into the same slot.
 export const createRouter = (routes, { keepAlive = false } = {}) => {
   const current = signal(location.hash.slice(1) || '/');
-  window.addEventListener('hashchange', () => { current.value = location.hash.slice(1) || '/'; });
+  let disposed = false;
+  const onHashChange = () => { current.value = location.hash.slice(1) || '/'; };
+  window.addEventListener('hashchange', onHashChange);
   const cache = keepAlive ? new Map() : null;
   const resolve = (key, factory) => {
     if (!keepAlive) return factory();
@@ -732,9 +784,8 @@ export const createRouter = (routes, { keepAlive = false } = {}) => {
     cache.set(key, inst);
     return inst;
   };
-  const route = (() => {
-    const s = signal(undefined);
-    const run = () => {
+  const route = signal(undefined);
+  const stopRoute = effect(() => {
       const path = current.value;
       for (const [pat, comp] of Object.entries(routes)) {
         if (pat === '*') continue;
@@ -742,7 +793,7 @@ export const createRouter = (routes, { keepAlive = false } = {}) => {
         const m = path.match(regex);
         if (m) {
           const params = m.slice(1);
-          s.value = typeof comp === 'function'
+          route.value = typeof comp === 'function'
             ? resolve(`${pat}|${params.join('/')}`, () => comp(...params))
             : comp;
           return;
@@ -750,17 +801,14 @@ export const createRouter = (routes, { keepAlive = false } = {}) => {
       }
       if (routes['*']) {
         const c = routes['*'];
-        s.value = typeof c === 'function' ? resolve('*', c) : c;
+        route.value = typeof c === 'function' ? resolve('*', c) : c;
         return;
       }
-      s.value = null;
-    };
-    effect(run);
-    return s;
-  })();
+      route.value = null;
+  });
   return {
     current, route,
-    navigate: path => { location.hash = path; },
+    navigate: path => { if (!disposed) location.hash = path; },
     match: pat => { const m = current.value.match(new RegExp('^' + pat.replace(/:\w+/g,'([^/]+)') + '$')); return m ? m.slice(1) : null; },
     // Drop cached instance(s) so the next visit rebuilds fresh. Omit `pattern`
     // to clear everything; pass a route pattern to clear just that route
@@ -769,6 +817,13 @@ export const createRouter = (routes, { keepAlive = false } = {}) => {
       if (!cache) return;
       if (pattern === undefined) { cache.clear(); return; }
       for (const k of [...cache.keys()]) if (k === pattern || k.startsWith(`${pattern}|`)) cache.delete(k);
+    },
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      window.removeEventListener('hashchange', onHashChange);
+      stopRoute();
+      cache?.clear();
     },
   };
 };

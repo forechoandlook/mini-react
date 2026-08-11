@@ -6,7 +6,7 @@ const win = new Window();
 global.document = win.document;
 global.window   = win;
 
-const { signal, effect, mount, h, For, store } = await import('../src/dom.js');
+const { signal, effect, mount, h, For, store, virtualList } = await import('../src/dom.js');
 
 const div = () => document.createElement('div');
 
@@ -70,5 +70,14 @@ describe('store — per-field reactive array', () => {
 
     assert.deepEqual([...d.querySelectorAll('tr')].map(tr => tr.dataset.key), ['1', '2', '3']);
     assert.equal(d.querySelector('[data-key="1"]'), tr1);
+  });
+
+  it('virtualList + store：可视行字段更新只刷新自己的行作用域', () => {
+    const rows = store([{ id: 1, score: 10 }, { id: 2, score: 20 }]);
+    const list = virtualList(signal(rows), row => h`<span data-key="${row.id}">${row.score}</span>`, 20, 2);
+    assert.equal(list.el.querySelector('[data-key="2"]').textContent, '20');
+    rows[1].score = 99;
+    assert.equal(list.el.querySelector('[data-key="2"]').textContent, '99');
+    list.dispose();
   });
 });
