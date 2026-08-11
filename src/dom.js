@@ -371,11 +371,20 @@ function _updateForBinding(lb, forVal) {
   }
   const map = lb.forMap;
   const parent = lb.marker.parentNode;
+  // Evaluate keys once. Besides avoiding a second user keyFn call on every
+  // update, rejecting duplicates prevents two logical rows from sharing one
+  // DOM/effect entry (a particularly confusing source of stale UI).
+  const newKeys = new Array(items.length), seenKeys = new Set();
+  for (let i = 0; i < items.length; i++) {
+    const key = keyFn(items[i], i);
+    if (seenKeys.has(key)) throw new TypeError(`For: duplicate key ${String(key)}`);
+    seenKeys.add(key); newKeys[i] = key;
+  }
 
   let sameShape = items.length === lb.forKeys.length;
   if (sameShape) {
     for (let i = 0; i < items.length; i++) {
-      if (keyFn(items[i], i) !== lb.forKeys[i]) { sameShape = false; break; }
+      if (newKeys[i] !== lb.forKeys[i]) { sameShape = false; break; }
     }
   }
 
@@ -388,12 +397,10 @@ function _updateForBinding(lb, forVal) {
 
   // Structural path: add/remove/reorder happened — full keyed reconciliation.
   const usedKeys = new Set();
-  const newKeys = new Array(items.length);
   let cursor = lb.marker;
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const key = keyFn(item, i);
-    newKeys[i] = key;
+    const key = newKeys[i];
     usedKeys.add(key);
     let entry = map.get(key);
     if (!entry) {
@@ -569,6 +576,10 @@ export const mount = (el, component, { escape = true } = {}) => {
       }
       else if (r?.__bind)                 { _dropTplState(); r.render(el); }
       else if (r?.__isTemplateResult) {
+        // A template has no HTML-string snapshot. Clear a previous snapshot
+        // so switching back to that same string cannot incorrectly skip its
+        // morph and leave the template DOM in place.
+        _lastHtml = undefined;
         _tplState = _renderTemplateResult(el, r, _tplState);
       }
       else if (r && typeof r === 'object') {
@@ -661,40 +672,64 @@ export const transitions = {
 // are unchanged either way.
 export const keyedList = (itemsSig, renderItem, getKey = i => i.id ?? i.key, { escape = true, tag = 'div' } = {}) => {
   const domMap = new Map();
-  return parentEl => effect(() => {
+  return parentEl => {
+    const disposeEntry = (entry, animate = false) => {
+      entry.stop();
+      entry.el.__tplState?.dispose?.();
+      if (animate) transitions.fadeOut(entry.el).finished?.then(() => entry.el.remove()) ?? entry.el.remove();
+      else entry.el.remove();
+    };
+    const renderEntry = entry => {
+      const raw = renderItem(entry.item.value, entry.index.value);
+      const el = entry.el;
+      if (raw?.__isTemplateResult) el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
+      else {
+        const h = escape && typeof raw === 'string' && !raw?.__trusted ? esc(raw) : (raw?.value ?? raw);
+        if (el.innerHTML !== h) el.innerHTML = h;
+      }
+    };
+    const stop = effect(() => {
     try {
       const items = itemsSig.value;
-      const live  = new Set(items.map(getKey));
-      for (const [key, el] of [...domMap]) {
+      const keys = new Array(items.length), live = new Set();
+      for (let i = 0; i < items.length; i++) {
+        const key = getKey(items[i], i);
+        if (live.has(key)) throw new TypeError(`keyedList: duplicate key ${String(key)}`);
+        live.add(key); keys[i] = key;
+      }
+      for (const [key, entry] of [...domMap]) {
         if (!live.has(key)) {
-          el.__tplState?.dispose?.();
-          transitions.fadeOut(el).finished?.then(() => el.remove()) ?? el.remove();
+          disposeEntry(entry, true);
           domMap.delete(key);
         }
       }
       let prev = null;
-      for (const item of items) {
-        const key = getKey(item);
-        const raw = renderItem(item);
-        let el = domMap.get(key);
-        if (!el) {
-          el = document.createElement(tag);
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i], key = keys[i];
+        let entry = domMap.get(key);
+        if (!entry) {
+          const el = document.createElement(tag);
           el.dataset.key = key;
-          domMap.set(key, el); parentEl.appendChild(el);
+          entry = { el, item: signal(item), index: signal(i), stop: null };
+          entry.stop = effect(() => renderEntry(entry));
+          domMap.set(key, entry); parentEl.appendChild(el);
           transitions.slideDown(el);
-        }
-        if (raw?.__isTemplateResult) {
-          el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
         } else {
-          const h = escape && typeof raw === 'string' && !raw?.__trusted ? esc(raw) : (raw?.value ?? raw);
-          if (el.innerHTML !== h) el.innerHTML = h;
+          batch(() => { entry.item.value = item; entry.index.value = i; });
         }
+        const el = entry.el;
         if (prev) { const next = prev.nextSibling; if (next !== el) parentEl.insertBefore(el, next); }
         else if (parentEl.firstChild !== el) parentEl.insertBefore(el, parentEl.firstChild);
         prev = el;
       }
     } catch (e) { console.error('[keyedList]', e); }
-  });
+    });
+    return () => {
+      stop();
+      for (const entry of domMap.values()) disposeEntry(entry);
+      domMap.clear();
+    };
+  };
 };
 
 // ── Virtual scroll ────────────────────────────────────────────────────────────

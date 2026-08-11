@@ -1,7 +1,7 @@
-/* mini-react/core v0.1.10 | https://github.com/forechoandlook/mini-react */
+/* mini-react/core v0.1.11 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
-var version = true ? "0.1.10" : "dev";
+var version = true ? "0.1.11" : "dev";
 var _eff = null;
 var _tracking = null;
 var _batchDepth = 0;
@@ -113,23 +113,28 @@ function _run(fn, runner, deps, cleanups) {
 var computed = (fn) => {
   const s = new Signal(void 0), deps = /* @__PURE__ */ new Set();
   let dirty = true, disposed = false;
-  const mark = () => {
-    if (dirty || disposed) return;
-    dirty = true;
-    _notify(s._subs);
-  };
-  mark._isComputed = true;
-  const read = () => {
+  const recompute = (notify) => {
     if (!dirty || disposed) return s._v;
     dirty = false;
     try {
       const v = _run(fn, mark, deps, null);
-      if (v !== s._v) s._v = v;
+      const changed = v !== s._v;
+      if (changed) s._v = v;
+      if (changed && notify) _notify(s._subs);
     } catch (e) {
       dirty = true;
       console.error("[computed]", e);
     }
     return s._v;
+  };
+  const mark = () => {
+    if (dirty || disposed) return;
+    dirty = true;
+    if (s._subs.size) recompute(true);
+  };
+  mark._isComputed = true;
+  const read = () => {
+    return recompute(false);
   };
   Object.defineProperty(s, "value", {
     get() {

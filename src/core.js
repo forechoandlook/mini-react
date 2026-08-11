@@ -131,26 +131,31 @@ export const computed = fn => {
   const s = new Signal(undefined), deps = new Set();
   let dirty = true, disposed = false;
   // Dependencies subscribe to this marker rather than eagerly rerunning the
-  // derivation. It marks the value stale and propagates that staleness; the
-  // next actual read computes once. This removes unused computed work and
-  // gives callers an explicit lifecycle hook for temporary derivations.
-  const mark = () => {
-    if (dirty || disposed) return;
-    dirty = true;
-    _notify(s._subs);
-  };
-  mark._isComputed = true;
-  const read = () => {
+  // derivation. Unobserved values only become stale; observed values settle
+  // in the computed queue first and notify consumers only when their output
+  // actually changed. This removes both unused work and false effect refreshes
+  // such as `computed(() => count.value % 2)` for 1 -> 3.
+  const recompute = notify => {
     if (!dirty || disposed) return s._v;
     dirty = false;
     try {
       const v = _run(fn, mark, deps, null);
-      // mark() already notified downstream readers when dependencies changed.
-      // Notifying again here would enqueue the effect currently reading this
-      // lazy value and make it run twice.
-      if (v !== s._v) s._v = v;
+      const changed = v !== s._v;
+      if (changed) s._v = v;
+      if (changed && notify) _notify(s._subs);
     } catch (e) { dirty = true; console.error('[computed]', e); }
     return s._v;
+  };
+  const mark = () => {
+    if (dirty || disposed) return;
+    dirty = true;
+    if (s._subs.size) recompute(true);
+  };
+  mark._isComputed = true;
+  const read = () => {
+    // A first read may happen inside an effect. Do not notify that same effect
+    // while it is establishing its dependency; it already sees this value.
+    return recompute(false);
   };
   Object.defineProperty(s, 'value', {
     get() {

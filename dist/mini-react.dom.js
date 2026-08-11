@@ -1,4 +1,4 @@
-/* mini-react/dom v0.1.10 | https://github.com/forechoandlook/mini-react */
+/* mini-react/dom v0.1.11 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
 var _eff = null;
@@ -112,23 +112,28 @@ function _run(fn, runner, deps, cleanups) {
 var computed = (fn) => {
   const s = new Signal(void 0), deps = /* @__PURE__ */ new Set();
   let dirty = true, disposed = false;
-  const mark = () => {
-    if (dirty || disposed) return;
-    dirty = true;
-    _notify(s._subs);
-  };
-  mark._isComputed = true;
-  const read = () => {
+  const recompute = (notify) => {
     if (!dirty || disposed) return s._v;
     dirty = false;
     try {
       const v = _run(fn, mark, deps, null);
-      if (v !== s._v) s._v = v;
+      const changed = v !== s._v;
+      if (changed) s._v = v;
+      if (changed && notify) _notify(s._subs);
     } catch (e) {
       dirty = true;
       console.error("[computed]", e);
     }
     return s._v;
+  };
+  const mark = () => {
+    if (dirty || disposed) return;
+    dirty = true;
+    if (s._subs.size) recompute(true);
+  };
+  mark._isComputed = true;
+  const read = () => {
+    return recompute(false);
   };
   Object.defineProperty(s, "value", {
     get() {
@@ -559,10 +564,17 @@ function _updateForBinding(lb, forVal) {
   }
   const map = lb.forMap;
   const parent = lb.marker.parentNode;
+  const newKeys = new Array(items.length), seenKeys = /* @__PURE__ */ new Set();
+  for (let i = 0; i < items.length; i++) {
+    const key = keyFn(items[i], i);
+    if (seenKeys.has(key)) throw new TypeError(`For: duplicate key ${String(key)}`);
+    seenKeys.add(key);
+    newKeys[i] = key;
+  }
   let sameShape = items.length === lb.forKeys.length;
   if (sameShape) {
     for (let i = 0; i < items.length; i++) {
-      if (keyFn(items[i], i) !== lb.forKeys[i]) {
+      if (newKeys[i] !== lb.forKeys[i]) {
         sameShape = false;
         break;
       }
@@ -575,12 +587,10 @@ function _updateForBinding(lb, forVal) {
     return;
   }
   const usedKeys = /* @__PURE__ */ new Set();
-  const newKeys = new Array(items.length);
   let cursor = lb.marker;
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const key = keyFn(item, i);
-    newKeys[i] = key;
+    const key = newKeys[i];
     usedKeys.add(key);
     let entry = map.get(key);
     if (!entry) {
@@ -732,6 +742,7 @@ var mount = (el, component, { escape = true } = {}) => {
         _dropTplState();
         r.render(el);
       } else if (r?.__isTemplateResult) {
+        _lastHtml = void 0;
         _tplState = _renderTemplateResult(el, r, _tplState);
       } else if (r && typeof r === "object") {
         _dropTplState();
@@ -825,45 +836,73 @@ var transitions = {
 };
 var keyedList = (itemsSig, renderItem, getKey = (i) => i.id ?? i.key, { escape = true, tag = "div" } = {}) => {
   const domMap = /* @__PURE__ */ new Map();
-  return (parentEl) => effect(() => {
-    try {
-      const items = itemsSig.value;
-      const live = new Set(items.map(getKey));
-      for (const [key, el] of [...domMap]) {
-        if (!live.has(key)) {
-          el.__tplState?.dispose?.();
-          transitions.fadeOut(el).finished?.then(() => el.remove()) ?? el.remove();
-          domMap.delete(key);
-        }
+  return (parentEl) => {
+    const disposeEntry = (entry, animate2 = false) => {
+      entry.stop();
+      entry.el.__tplState?.dispose?.();
+      if (animate2) transitions.fadeOut(entry.el).finished?.then(() => entry.el.remove()) ?? entry.el.remove();
+      else entry.el.remove();
+    };
+    const renderEntry = (entry) => {
+      const raw = renderItem(entry.item.value, entry.index.value);
+      const el = entry.el;
+      if (raw?.__isTemplateResult) el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
+      else {
+        const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
+        if (el.innerHTML !== h2) el.innerHTML = h2;
       }
-      let prev = null;
-      for (const item of items) {
-        const key = getKey(item);
-        const raw = renderItem(item);
-        let el = domMap.get(key);
-        if (!el) {
-          el = document.createElement(tag);
-          el.dataset.key = key;
-          domMap.set(key, el);
-          parentEl.appendChild(el);
-          transitions.slideDown(el);
+    };
+    const stop = effect(() => {
+      try {
+        const items = itemsSig.value;
+        const keys = new Array(items.length), live = /* @__PURE__ */ new Set();
+        for (let i = 0; i < items.length; i++) {
+          const key = getKey(items[i], i);
+          if (live.has(key)) throw new TypeError(`keyedList: duplicate key ${String(key)}`);
+          live.add(key);
+          keys[i] = key;
         }
-        if (raw?.__isTemplateResult) {
-          el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
-        } else {
-          const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
-          if (el.innerHTML !== h2) el.innerHTML = h2;
+        for (const [key, entry] of [...domMap]) {
+          if (!live.has(key)) {
+            disposeEntry(entry, true);
+            domMap.delete(key);
+          }
         }
-        if (prev) {
-          const next = prev.nextSibling;
-          if (next !== el) parentEl.insertBefore(el, next);
-        } else if (parentEl.firstChild !== el) parentEl.insertBefore(el, parentEl.firstChild);
-        prev = el;
+        let prev = null;
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i], key = keys[i];
+          let entry = domMap.get(key);
+          if (!entry) {
+            const el2 = document.createElement(tag);
+            el2.dataset.key = key;
+            entry = { el: el2, item: signal(item), index: signal(i), stop: null };
+            entry.stop = effect(() => renderEntry(entry));
+            domMap.set(key, entry);
+            parentEl.appendChild(el2);
+            transitions.slideDown(el2);
+          } else {
+            batch(() => {
+              entry.item.value = item;
+              entry.index.value = i;
+            });
+          }
+          const el = entry.el;
+          if (prev) {
+            const next = prev.nextSibling;
+            if (next !== el) parentEl.insertBefore(el, next);
+          } else if (parentEl.firstChild !== el) parentEl.insertBefore(el, parentEl.firstChild);
+          prev = el;
+        }
+      } catch (e) {
+        console.error("[keyedList]", e);
       }
-    } catch (e) {
-      console.error("[keyedList]", e);
-    }
-  });
+    });
+    return () => {
+      stop();
+      for (const entry of domMap.values()) disposeEntry(entry);
+      domMap.clear();
+    };
+  };
 };
 var virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5, { escape = true } = {}) => {
   const wrap = document.createElement("div");

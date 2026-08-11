@@ -6,7 +6,7 @@ const win = new Window();
 global.document = win.document;
 global.window   = win;
 
-const { signal, mount } = await import('../src/dom.js');
+const { signal, mount, h } = await import('../src/dom.js');
 
 const div = () => document.createElement('div');
 
@@ -98,5 +98,15 @@ describe('mount — DOM morph (diff/patch instead of blind innerHTML replace)', 
     n.value = 2;
     assert.ok(d.querySelector('#box') === box);
     assert.equal(box.textContent, 'count 2');
+  });
+
+  it('在字符串和 h`` 模板间切换时，不会错误复用过期的字符串快照', () => {
+    const mode = signal('string');
+    const d = div();
+    mount(d, () => mode.value === 'string' ? '<p>saved</p>' : h`<p>template</p>`, { escape: false });
+    mode.value = 'template';
+    assert.equal(d.textContent, 'template');
+    mode.value = 'string';
+    assert.equal(d.textContent, 'saved');
   });
 });

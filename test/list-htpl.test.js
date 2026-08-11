@@ -45,6 +45,20 @@ describe('keyedList — renderItem 可以返回 h`` 结果，走细粒度 patch'
     assert.equal(span.firstChild.data, origData);
   });
 
+  it('只重渲染引用实际变化的 item，不重新调用其它行 renderItem', () => {
+    const a = { id: 'a', text: 'A' }, b = { id: 'b', text: 'B' };
+    const sig = signal([a, b]);
+    const parent = div();
+    const calls = new Map();
+    keyedList(sig, item => {
+      calls.set(item.id, (calls.get(item.id) ?? 0) + 1);
+      return h`<span>${item.text}</span>`;
+    }, item => item.id)(parent);
+    sig.value = [{ id: 'a', text: 'A2' }, b];
+    assert.equal(calls.get('a'), 2);
+    assert.equal(calls.get('b'), 1, '未变化的 item 不应重新执行 renderItem');
+  });
+
   it('删除项仍然是异步淡出（h`` 模式不改变现有的动画行为）', async () => {
     const sig = signal([{ id: 'a', text: 'A' }]);
     const parent = div();

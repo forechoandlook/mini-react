@@ -81,6 +81,17 @@ describe('computed', () => {
     assert.equal(c.value, 2);
     assert.equal(runs, 1);
   });
+
+  it('computed 输出不变时不重跑依赖它的 effect', () => {
+    const n = signal(1);
+    const parity = computed(() => n.value % 2);
+    let effectRuns = 0;
+    effect(() => { parity.value; effectRuns++; });
+    n.value = 3;
+    assert.equal(effectRuns, 1, '派生结果仍为 1，不应刷新消费者');
+    n.value = 4;
+    assert.equal(effectRuns, 2);
+  });
 });
 
 describe('effect', () => {
