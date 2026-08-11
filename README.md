@@ -56,6 +56,9 @@ plus optional ready-made card/button/form classes.
 </main>
 ```
 
-Run locally with `npm ci`, `npm test`, and `npm run build`.
+Run locally with `npm ci`, `npx playwright install chromium`, `npm test`, and
+`npm run build`. The test suite includes real Chromium coverage of focus/input,
+compiled-template patches, keyed reorders, virtual scrolling, and microtask
+batching against the built browser bundle.
 
 See [README.mini.md](README.mini.md) for the complete Chinese API reference and examples.
