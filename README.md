@@ -37,6 +37,22 @@ count.value += 1; // DOM is updated synchronously
 | `dist/mini-react.core.min.js` | Signals and reactive primitives |
 | `dist/mini-react.dom.min.js` | DOM rendering and UI helpers |
 | `dist/mini-react.data.min.js` | Data fetching and browser storage |
+| `dist/mini-react.min.css` | Optional scoped UI primitives |
+
+## Optional CSS
+
+The CSS is opt-in and scoped under `.mr-root`, with no global reset. It includes
+tokens, layout helpers, cards, buttons, form fields, badges, alerts and a spinner.
+
+```html
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/forechoandlook/mini-react@latest/dist/mini-react.min.css">
+<main class="mr-root mr-auto-dark mr-stack">
+  <section class="mr-card mr-stack-sm">
+    <label class="mr-field"><span class="mr-label">Name</span><input class="mr-input"></label>
+    <button class="mr-btn">Save</button>
+  </section>
+</main>
+```
 
 Run locally with `npm ci`, `npm test`, and `npm run build`.
 
