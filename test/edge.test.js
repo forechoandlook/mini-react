@@ -88,7 +88,7 @@ describe('batch — 嵌套', () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe('computed — 菱形依赖', () => {
-  it('A→B、A→C、B+C→D：A 变化时 D 计算两次（push 模型已知行为）', () => {
+  it('A→B、A→C、B+C→D：A 变化时 D 只计算一次', () => {
     const a = signal(1);
     const b = computed(() => a.value + 1);
     const c = computed(() => a.value * 2);
@@ -99,11 +99,10 @@ describe('computed — 菱形依赖', () => {
     dRuns = 0;
     a.value = 2; // b=3, c=4, d=7
     assert.equal(d.value, 7);
-    // push 模型无拓扑排序：b 先通知 d，d 用旧 c 计算一次；c 再通知 d，d 再算一次
-    assert.equal(dRuns, 2); // 记录实际行为：计算两次但结果正确
+    assert.equal(dRuns, 1); // 先结算 B/C，再运行依赖它们的 D
   });
 
-  it('batch 不保护 computed 菱形（computed 通知绕过 _batching）', () => {
+  it('batch 同样避免 computed 菱形的重复计算', () => {
     const a = signal(1);
     const b = computed(() => a.value + 1);
     const c = computed(() => a.value * 2);
@@ -111,9 +110,20 @@ describe('computed — 菱形依赖', () => {
     const d = computed(() => { dRuns++; return b.value + c.value; });
     dRuns = 0;
     batch(() => { a.value = 3; });
-    // computed 在 flush 时直接调用订阅者，不走 _pending，d 仍然计算两次
-    assert.equal(dRuns, 2); // 已知限制：computed 不参与批量调度
+    assert.equal(dRuns, 1);
     assert.equal(d.value, 10); // 结果正确
+  });
+
+  it('先创建的 effect 也只会看到已结算的 computed 值一次', () => {
+    const a = signal(1);
+    let seen = [];
+    let b;
+    effect(() => { seen.push([a.value, b?.value]); });
+    b = computed(() => a.value * 2);
+    seen = [];
+
+    a.value = 2;
+    assert.deepEqual(seen, [[2, 4]]);
   });
 });
 

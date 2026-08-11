@@ -1,12 +1,14 @@
-/* mini-react/core v0.1.6 | https://github.com/forechoandlook/mini-react */
+/* mini-react/core v0.1.7 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
-var version = true ? "0.1.6" : "dev";
+var version = true ? "0.1.7" : "dev";
 var _eff = null;
 var _tracking = null;
 var _batchDepth = 0;
 var _currCleanups = null;
-var _pending = /* @__PURE__ */ new Set();
+var _pendingComputed = /* @__PURE__ */ new Set();
+var _pendingEffects = /* @__PURE__ */ new Set();
+var _isFlushing = false;
 var _mode = "sync";
 var _microtaskFlushScheduled = false;
 var setUpdateMode = (mode) => {
@@ -23,11 +25,31 @@ function _scheduleMicrotaskFlush() {
   });
 }
 var flushSync = () => {
-  if (_pending.size === 0) return;
-  const q = [..._pending];
-  _pending.clear();
-  for (const f of q) f();
+  if (_isFlushing) return;
+  _isFlushing = true;
+  try {
+    while (_pendingComputed.size || _pendingEffects.size) {
+      while (_pendingComputed.size) {
+        const f = _pendingComputed.values().next().value;
+        _pendingComputed.delete(f);
+        f();
+      }
+      if (_pendingEffects.size) {
+        const f = _pendingEffects.values().next().value;
+        _pendingEffects.delete(f);
+        f();
+      }
+    }
+  } finally {
+    _isFlushing = false;
+  }
 };
+function _notify(subs) {
+  for (const f of subs) (f._isComputed ? _pendingComputed : _pendingEffects).add(f);
+  if (_batchDepth > 0 || _isFlushing) return;
+  if (_mode === "microtask") _scheduleMicrotaskFlush();
+  else flushSync();
+}
 var Signal = class {
   constructor(v, eq) {
     this._v = v;
@@ -44,12 +66,7 @@ var Signal = class {
   set value(v) {
     if (this._eq(v, this._v)) return;
     this._v = v;
-    if (_batchDepth > 0 || _mode === "microtask") {
-      for (const f of this._subs) _pending.add(f);
-      if (_mode === "microtask" && _batchDepth === 0) _scheduleMicrotaskFlush();
-    } else {
-      for (const f of [...this._subs]) f();
-    }
+    _notify(this._subs);
   }
   peek() {
     return this._v;
@@ -83,12 +100,13 @@ var computed = (fn) => {
       const v = _run(fn, run, deps, null);
       if (v !== s._v) {
         s._v = v;
-        for (const f of [...s._subs]) f();
+        _notify(s._subs);
       }
     } catch (e) {
       console.error("[computed]", e);
     }
   };
+  run._isComputed = true;
   run();
   return s;
 };

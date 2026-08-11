@@ -1,7 +1,13 @@
 export const version = typeof __VERSION__ !== 'undefined' ? __VERSION__ : 'dev';
 
 let _eff = null, _tracking = null, _batchDepth = 0, _currCleanups = null;
-const _pending = new Set();
+// Keep derived computations ahead of user effects.  A source update can fan
+// out into a diamond (A -> B, A -> C, B + C -> D); running subscribers as a
+// plain recursive push makes D observe B and C one at a time and rerun twice.
+// These two Sets both dedupe and give computed values a stable "settle first"
+// phase while preserving synchronous updates by default.
+const _pendingComputed = new Set(), _pendingEffects = new Set();
+let _isFlushing = false;
 
 // ── Update mode ──────────────────────────────────────────────────────────────
 // 'sync' (default): every write reruns its subscribers immediately, in the
@@ -39,10 +45,34 @@ function _scheduleMicrotaskFlush() {
 // call sites that need an immediate flush (e.g. tests, or an imperative
 // "commit now" before reading the DOM) without switching modes.
 export const flushSync = () => {
-  if (_pending.size === 0) return;
-  const q = [..._pending]; _pending.clear();
-  for (const f of q) f();
+  if (_isFlushing) return;
+  _isFlushing = true;
+  try {
+    // Take one effect at a time so a write from it can settle all affected
+    // computeds before the next effect observes application state.
+    while (_pendingComputed.size || _pendingEffects.size) {
+      while (_pendingComputed.size) {
+        const f = _pendingComputed.values().next().value;
+        _pendingComputed.delete(f);
+        f();
+      }
+      if (_pendingEffects.size) {
+        const f = _pendingEffects.values().next().value;
+        _pendingEffects.delete(f);
+        f();
+      }
+    }
+  } finally {
+    _isFlushing = false;
+  }
 };
+
+function _notify(subs) {
+  for (const f of subs) (f._isComputed ? _pendingComputed : _pendingEffects).add(f);
+  if (_batchDepth > 0 || _isFlushing) return;
+  if (_mode === 'microtask') _scheduleMicrotaskFlush();
+  else flushSync();
+}
 
 class Signal {
   constructor(v, eq) { this._v = v; this._subs = new Set(); this._eq = eq ?? ((a, b) => a === b); }
@@ -53,12 +83,7 @@ class Signal {
   set value(v) {
     if (this._eq(v, this._v)) return;
     this._v = v;
-    if (_batchDepth > 0 || _mode === 'microtask') {
-      for (const f of this._subs) _pending.add(f);
-      if (_mode === 'microtask' && _batchDepth === 0) _scheduleMicrotaskFlush();
-    } else {
-      for (const f of [...this._subs]) f();
-    }
+    _notify(this._subs);
   }
   peek() { return this._v; }
 }
@@ -89,9 +114,10 @@ export const computed = fn => {
   const run = () => {
     try {
       const v = _run(fn, run, deps, null);
-      if (v !== s._v) { s._v = v; for (const f of [...s._subs]) f(); }
+      if (v !== s._v) { s._v = v; _notify(s._subs); }
     } catch (e) { console.error('[computed]', e); }
   };
+  run._isComputed = true;
   run();
   return s;
 };
