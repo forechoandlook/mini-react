@@ -205,6 +205,49 @@ describe('createFetch', () => {
     assert.equal(calls, 1);
   });
 
+  it('并发的相同 key 默认合并为一次请求', async () => {
+    const api = createFetch();
+    let calls = 0;
+    let resolve;
+    const fetcher = () => { calls++; return new Promise(r => { resolve = r; }); };
+    const first = api.get('same', fetcher);
+    const second = api.get('same', fetcher);
+    assert.equal(calls, 1);
+    resolve('shared');
+    assert.deepEqual(await Promise.all([first, second]), ['shared', 'shared']);
+  });
+
+  it('dedupe:false 允许调用方主动并发请求', async () => {
+    const api = createFetch();
+    let calls = 0;
+    const fetcher = () => { calls++; return Promise.resolve(calls); };
+    assert.deepEqual(await Promise.all([
+      api.get('same', fetcher, { dedupe: false }),
+      api.get('same', fetcher, { dedupe: false }),
+    ]), [1, 2]);
+  });
+
+  it('单次 ttl 应用于内存缓存过期时间', async () => {
+    const api = createFetch({ ttl: 60_000 });
+    let calls = 0;
+    const fetcher = () => Promise.resolve(++calls);
+    await api.get('short', fetcher, { ttl: 1 });
+    await new Promise(r => setTimeout(r, 5));
+    assert.equal(await api.get('short', fetcher, { ttl: 1 }), 2);
+  });
+
+  it('失效期间完成的旧请求不会重新写入缓存', async () => {
+    const api = createFetch();
+    let resolve;
+    const pending = api.get('stale', () => new Promise(r => { resolve = r; }));
+    api.invalidate('stale');
+    resolve('old');
+    await pending;
+    let calls = 0;
+    assert.equal(await api.get('stale', () => Promise.resolve(++calls)), 1);
+    assert.equal(calls, 1);
+  });
+
   it('ttl:0 强制跳过缓存', async () => {
     const api = createFetch({ ttl: 60_000 });
     let calls = 0;

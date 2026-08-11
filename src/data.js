@@ -1,4 +1,5 @@
 export { signal, computed, effect, batch, watch, onCleanup, esc, html } from './core.js';
+export { createQueryClient, defaultQueryClient, createQuery } from './query.js';
 import { signal, effect, batch } from './core.js';
 
 // ── createResource ────────────────────────────────────────────────────────────
@@ -19,13 +20,15 @@ export const createResource = (source, fetcher) => {
 };
 
 // ── createFetch ───────────────────────────────────────────────────────────────
-export const createFetch = ({ cache = true, ttl = 30_000, retry = 2, retryDelay = 1000, store = null } = {}) => {
+export const createFetch = ({ cache = true, ttl = 30_000, retry = 2, retryDelay = 1000, store = null, dedupe = true } = {}) => {
   const _mem = new Map();
+  const _pending = new Map();
+  const _versions = new Map();
 
-  const cacheGet = async key => {
+  const cacheGet = (key, t) => {
     if (store) return store.get(key);
     const hit = _mem.get(key);
-    return hit && Date.now() - hit.ts < ttl ? hit.data : undefined;
+    return hit && Date.now() - hit.ts < t ? hit.data : undefined;
   };
   // Fix: await store.set so async stores aren't fire-and-forget
   const cacheSet = async (key, data, t) => {
@@ -33,26 +36,49 @@ export const createFetch = ({ cache = true, ttl = 30_000, retry = 2, retryDelay 
     _mem.set(key, { data, ts: Date.now() });
   };
 
-  const get = async (key, fetcher, opts = {}) => {
+  const get = (key, fetcher, opts = {}) => {
     const t = opts.ttl ?? ttl;
-    if (cache && opts.ttl !== 0) {
-      const hit = await cacheGet(key);
-      if (hit !== undefined) return hit;
-    }
-    const attempt = (n, delay) =>
-      Promise.resolve(fetcher()).then(async data => {
-        if (cache) await cacheSet(key, data, t);
+    const shouldCache = cache && opts.cache !== false && t !== 0;
+    const shouldDedupe = opts.dedupe ?? dedupe;
+    if (shouldDedupe && _pending.has(key)) return _pending.get(key);
+
+    const request = () => {
+      const version = _versions.get(key) ?? 0;
+      const attempt = (n, delay) =>
+        Promise.resolve(fetcher()).then(async data => {
+        // Do not restore data invalidated while this request was in flight.
+          if (shouldCache && (_versions.get(key) ?? 0) === version) await cacheSet(key, data, t);
         return data;
-      }).catch(e => {
+        }).catch(e => {
         if (n > 0 && e?.name !== 'AbortError') return new Promise(r => setTimeout(r, delay)).then(() => attempt(n - 1, delay * 2));
         throw e;
-      });
-    return attempt(opts.retry ?? retry, retryDelay);
+        });
+      return attempt(opts.retry ?? retry, retryDelay);
+    };
+    const track = promise => {
+      if (!shouldDedupe) return promise;
+      _pending.set(key, promise);
+      promise.finally(() => { if (_pending.get(key) === promise) _pending.delete(key); }).catch(() => {});
+      return promise;
+    };
+
+    if (!shouldCache) return track(request());
+    // In-memory hits are synchronous; a persistent store is necessarily async.
+    if (!store) {
+      const hit = cacheGet(key, t);
+      return hit !== undefined ? Promise.resolve(hit) : track(request());
+    }
+    return track(Promise.resolve(cacheGet(key, t)).then(hit => hit !== undefined ? hit : request()));
   };
 
   const invalidate = key => {
-    if (store) return key ? store.delete(key) : store.clear();
-    key ? _mem.delete(key) : _mem.clear();
+    if (key !== undefined) _versions.set(key, (_versions.get(key) ?? 0) + 1);
+    else {
+      for (const k of _mem.keys()) _versions.set(k, (_versions.get(k) ?? 0) + 1);
+      for (const k of _pending.keys()) _versions.set(k, (_versions.get(k) ?? 0) + 1);
+    }
+    if (store) return key === undefined ? store.clear() : store.delete(key);
+    key === undefined ? _mem.clear() : _mem.delete(key);
   };
 
   return { get, invalidate };

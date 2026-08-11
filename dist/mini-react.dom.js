@@ -1,4 +1,4 @@
-/* mini-react/dom v0.1.12 | https://github.com/forechoandlook/mini-react */
+/* mini-react/dom v0.1.13 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
 var _eff = null;

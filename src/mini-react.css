@@ -61,6 +61,15 @@
 .mr-muted { color: var(--mr-muted); }
 .mr-empty { color: var(--mr-muted); text-align: center; padding: 2rem 1rem; }
 
+.mr-card-title { font-size: 1rem; margin: 0 0 .75rem; }
+.mr-table-wrap { border: 1px solid var(--mr-line); border-radius: var(--mr-radius); overflow-x: auto; }
+.mr-table { border-collapse: collapse; min-width: 100%; width: 100%; }
+.mr-table :where(th, td) { border-bottom: 1px solid var(--mr-line); padding: .65rem .75rem; text-align: left; vertical-align: middle; }
+.mr-table th { background: var(--mr-soft); color: var(--mr-muted); font-size: .75rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; white-space: nowrap; }
+.mr-table tbody tr:last-child :where(th, td) { border-bottom: 0; }
+.mr-table tbody tr:hover { background: color-mix(in srgb, var(--mr-primary), transparent 96%); }
+.mr-table-empty td { color: var(--mr-muted); padding: 2rem 1rem; text-align: center; }
+
 .mr-btn {
   align-items: center; background: var(--mr-primary); border: 1px solid var(--mr-primary); border-radius: 8px;
   color: var(--mr-primary-contrast); display: inline-flex; font-weight: 600; gap: .4rem; justify-content: center;

@@ -3,6 +3,9 @@
 ```js
 import { signal, effect, computed, batch, watch, asyncEffect,
          mount, show, bind, text, cls, attr, h, For, store, defineComponent,
+         Card, Button, Input, Select, Textarea, Badge, Alert, Empty, Spinner, Table,
+         ui, setUIDebug, onUIDebug,
+         createQueryClient, createQuery,
          delegate, keyedList, virtualList, createRouter,
          setUpdateMode, getUpdateMode, flushSync,
          $, $$, on, once, nextTick, debounce, throttle, debouncedSignal,
@@ -32,6 +35,8 @@ import { signal, effect, computed, batch, watch, asyncEffect,
 - `createRouter(routes, { keepAlive? })` — hash 路由，支持 `:param` 参数路由；默认 `keepAlive: false`，每次访问都重新调用 route 工厂（组件本地状态不保留）；`keepAlive: true` 时按 `pattern + params` 缓存组件实例，离开再回来时复用同一实例、`signal()` 状态保留（但实例内部的 `ctx.effect`/`ctx.asyncEffect` 会在离开时停止，不会在返回时自动恢复——只有渲染用到的 signal 值会保留）；返回 `{ current, route, navigate(path), match(pattern), invalidate(pattern?) }`，`invalidate()` 清空全部缓存，`invalidate('/a')` 只清该路由
 - `h\`<div>${component}</div>\`` — 编译一次结构、克隆+精确打补丁的模板字面量（不是每次重新解析 HTML 字符串），值为函数或组件对象时自动挂载到 slot，普通值自动转义。同一个 callsite 多次渲染只解析一次
 - `For(items, keyFn, (item, i) => h\`...\`)` — `h\`\`` 模板里的键控列表插槽，例如 `h\`<tbody>${For(rows.value, r => r.id, r => h\`<tr data-key="${r.id}">...</tr>\`)}</tbody>\``。每行本身是嵌套的 `h\`\`` 模板：结构只解析一次，之后新增行只是原生 `cloneNode`，已有行只 patch 变化的插值点；增删/重排走 O(变化量) 的 keyed diff，不会重建未受影响的行；配合 `store()`（见下）单元格更新可以做到 O(1)，完全不经过外层的 key-diff
+- `Card`、`Button`、`Input`、`Select`、`Textarea`、`Badge`、`Alert`、`Empty`、`Spinner`、`Table` — 默认 UI 原语；需引入可选 CSS。`Table({ rows, columns, key?, caption?, empty? })` 支持数组或 signal 行数据、键控更新、横向滚动及空状态；排序、分页、筛选仍由业务层控制。
+- `ui(schema, { values?, actions?, debug? })` — JSON 驱动的组合入口。schema 只描述结构，`"$name"` 引用 `values.name`（可为 signal）；`action` 仅引用显式 `actions` 映射中的函数，避免把可执行代码写进 JSON。`setUIDebug(true)` 与 `onUIDebug(listener)` 提供默认关闭的渲染/事件调试入口，事件不会暴露输入值。
 - `store(array)` — 按字段细粒度响应的数组：`store[i].field` 读取时才懒创建一个该字段的 `Signal`，写 `store[i].field = x` 只通知读过这个字段的 effect，不牵连其它行/字段。`push`/`splice`/`sort`/整行替换/`length =` 等结构性操作会让受影响的行失去身份缓存并触发一次整体重渲染；纯字段读取（`.length`、`for..of`）不会被字段写入误触发。搭配 `For` 使用时，单元格更新是 O(1) 且完全不经过 `For` 的外层扫描——注意每个被读过的字段都会分配一个独立的 `Signal` 对象，字段多、行数多时比同样数据的普通数组多占不少内存，不需要逐字段细粒度更新的场景优先用普通 `signal(array)` + `.map()`
 - `defineComponent((props, ctx) => () => htmlStr)` — 有状态组件，见下方说明。同一个 `defineComponent()` 定义的组件，如果连续两次调用时 props 浅比较相等（同 key、每个值 `Object.is` 相等），会直接复用上一次的实例（不重跑 `setup`、不触发 `onUnmount`/`onMount`、DOM 不会被拆除重建）——这只对"同一个位置渲染一个组件"生效；同一个组件类型在循环里同时渲染多个实例时不会互相串状态，但也拿不到这个优化
 - `$(id)` — `document.getElementById` 简写
@@ -43,7 +48,23 @@ import { signal, effect, computed, batch, watch, asyncEffect,
 - `throttle(fn, ms)` — 节流，返回的函数有 `.cancel()`
 - `debouncedSignal(sig, ms)` — 返回防抖后的新 signal，输入 signal 变化后延迟更新
 - `createResource(sourceSig?, async (src, signal) => data)` — 数据请求，返回 `[{ data, loading, error }, { refetch, mutate }]`，source 变化自动重新请求并 abort 上一次
-- `createFetch({ cache, ttl, retry, retryDelay, store })` — 带缓存和重试的 fetch 工厂，返回 `{ get(key, fetcher, opts?), invalidate(key?) }`
+- `createFetch({ cache, ttl, retry, retryDelay, store, dedupe })` — 带缓存、请求合并和重试的 fetch 工厂，返回 `{ get(key, fetcher, opts?), invalidate(key?) }`；默认缓存 30 秒且相同 key 的并发请求只发一次。`get` 可用 `{ cache: false }`、`{ ttl: 0 }` 或 `{ dedupe: false }` 显式关闭对应默认行为。浏览器会自动协商 gzip/br；实际网络压缩需由 API/CDN 返回 `Content-Encoding`，前端不能也不应手动设置 `Accept-Encoding`。
+- `createQueryClient(options?)` / `createQuery(options)` — 完整的数据同步层。`client.query({ queryKey, queryFn, staleTime?, gcTime?, tags?, refetchInterval? })` 返回 `[{ data, error, status, fetchStatus, updatedAt, isStale }, controls]`；这些字段都是 signal，可直接在 `mount`/`h\`\`` 中读取。默认不在窗口聚焦时自动刷新，避免后台频繁请求；可用 `refetchOnWindowFocus: true` 开启。
+- Query controls：`refetch()`、`setData(updater)`、`invalidate()`、`cancel()`、`dispose()`；Client 还提供 `prefetchQuery`、`fetchQuery`、`setQueryData`、`invalidateQueries({ queryKey?, tags?, exact? })`、`cancelQueries`、`removeQueries`。缓存有 stale/GC 两个独立周期，查询无 observer 后按 `gcTime` 回收；JSON 返回值默认做结构共享，等价字段会复用旧引用（可设 `structuralSharing: false` 关闭）。
+- `client.mutate({ mutationFn, variables, optimistic?, invalidate? })` — mutation 支持乐观更新与失败回滚；`optimistic` 可写 `{ queryKey, updater }`，`invalidate` 使用与 `invalidateQueries` 相同的过滤器。`client.infiniteQuery({ queryKey, queryFn, initialPageParam, getNextPageParam })` 提供 `fetchNextPage()`。
+- `client.dehydrate()` / `client.hydrate(snapshot)` — SSR/预加载的安全 JSON 快照；`client.persist({ storage, key, version })` 支持版本化持久化；`client.sync(channelName?)` 使用 `BroadcastChannel` 跨标签广播失效（不广播数据）；`client.fetchJSON()` 会复用 ETag 并读取服务端 `Cache-Control: max-age`。`client.subscribe()` / `client.getDebugSnapshot()` 是无 UI 绑定的 Query 调试入口。
+
+```js
+const client = createQueryClient({ staleTime: 30_000, gcTime: 5 * 60_000 });
+const [user, userQuery] = client.query({
+  queryKey: ['user', userId],
+  tags: ['user'],
+  queryFn: ({ signal }) => fetch(`/api/users/${userId}`, { signal }).then(r => r.json()),
+});
+
+mount(root, () => h`<p>${user.fetchStatus.value === 'fetching' ? '刷新中' : user.data.value?.name ?? '加载中'}</p>`);
+// 保存后：await client.invalidateQueries({ tags: ['user'] });
+```
 - `createStore(init, { persist? })` — 响应式对象 store，字段读写自动追踪；`persist` 指定 localStorage key，写入经 microtask 防抖，多次写合并一次序列化
 - `ls.get(key)` / `ls.set(key, val, { compress? })` / `ls.remove(key)` — localStorage 封装，支持 gzip 压缩；写满时打印警告，不自动驱逐其他 key
 - `idb(dbName, storeName?)` — IndexedDB KV 封装，返回 `{ get, set(key, val, { ttl? }), delete, clear, keys }`；TTL 为懒删除（读时清理）

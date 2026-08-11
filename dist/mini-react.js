@@ -1,7 +1,7 @@
-/* mini-react/all v0.1.12 | https://github.com/forechoandlook/mini-react */
+/* mini-react/all v0.1.13 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
-var version = true ? "0.1.12" : "dev";
+var version = true ? "0.1.13" : "dev";
 var _eff = null;
 var _tracking = null;
 var _batchDepth = 0;
@@ -1154,6 +1154,426 @@ var debouncedSignal = (src, ms) => {
   return out;
 };
 
+// src/query.js
+var _isOnline = () => typeof navigator === "undefined" || navigator.onLine !== false;
+var _wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var _stable = (value) => {
+  if (value === void 0) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (value instanceof Date) return `Date(${value.toJSON()})`;
+  if (Array.isArray(value)) return `[${value.map(_stable).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${_stable(value[key])}`).join(",")}}`;
+};
+var _match = (record, filter) => {
+  if (!filter) return true;
+  if (typeof filter === "function") return filter(record);
+  if (filter.queryKey) {
+    const prefix = _stable(filter.queryKey);
+    if (filter.exact ? record.hash !== prefix : !record.hash.startsWith(prefix.slice(0, -1))) return false;
+  }
+  return !filter.tags || filter.tags.some((tag) => record.tags.has(tag));
+};
+var _serializable = (value) => {
+  try {
+    JSON.stringify(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+var _share = (oldValue, nextValue) => {
+  if (Object.is(oldValue, nextValue)) return oldValue;
+  if (!oldValue || !nextValue || typeof oldValue !== "object" || typeof nextValue !== "object") return nextValue;
+  if (Array.isArray(oldValue) && Array.isArray(nextValue)) {
+    if (oldValue.length !== nextValue.length) return nextValue;
+    const out2 = nextValue.map((value, index) => _share(oldValue[index], value));
+    return out2.every((value, index) => value === oldValue[index]) ? oldValue : out2;
+  }
+  if (Array.isArray(oldValue) || Array.isArray(nextValue) || Object.getPrototypeOf(oldValue) !== Object.prototype || Object.getPrototypeOf(nextValue) !== Object.prototype) return nextValue;
+  const keys = Object.keys(nextValue);
+  if (keys.length !== Object.keys(oldValue).length) return nextValue;
+  const out = {};
+  for (const key of keys) {
+    if (!(key in oldValue)) return nextValue;
+    out[key] = _share(oldValue[key], nextValue[key]);
+  }
+  return keys.every((key) => out[key] === oldValue[key]) ? oldValue : out;
+};
+var createQueryClient = ({
+  staleTime = 3e4,
+  gcTime = 3e5,
+  retry = 2,
+  retryDelay = 1e3,
+  refetchOnWindowFocus = false,
+  refetchOnReconnect = true
+} = {}) => {
+  const records = /* @__PURE__ */ new Map();
+  const listeners = /* @__PURE__ */ new Set();
+  const http = /* @__PURE__ */ new Map();
+  let channel = null;
+  let destroyed = false;
+  const emit = (event) => {
+    for (const listener of listeners) listener(event);
+  };
+  const state = (record) => record.state;
+  const fresh = (record) => !record.invalidated && Date.now() - record.state.updatedAt.peek() < record.options.staleTime;
+  const markStale = (record) => {
+    record.invalidated = true;
+    record.state.isStale.value = true;
+  };
+  const clearGc = (record) => {
+    if (record.gcTimer) clearTimeout(record.gcTimer);
+    record.gcTimer = null;
+  };
+  const scheduleGc = (record) => {
+    clearGc(record);
+    if (!record.observers && Number.isFinite(record.options.gcTime)) record.gcTimer = setTimeout(() => {
+      if (!record.observers && !record.promise) {
+        records.delete(record.hash);
+        emit({ type: "gc", key: record.key });
+      }
+    }, record.options.gcTime);
+  };
+  const clearPoll = (record) => {
+    if (record.pollTimer) clearTimeout(record.pollTimer);
+    record.pollTimer = null;
+  };
+  const schedulePoll = (record) => {
+    clearPoll(record);
+    const interval = typeof record.options.refetchInterval === "function" ? record.options.refetchInterval(record) : record.options.refetchInterval;
+    if (record.observers && Number.isFinite(interval) && interval > 0) record.pollTimer = setTimeout(async () => {
+      if (_isOnline()) await fetchRecord(record, { force: true }).catch(() => {
+      });
+      schedulePoll(record);
+    }, interval);
+  };
+  const createRecord = (input, hash = _stable(input.queryKey)) => {
+    const options = { staleTime, gcTime, retry, retryDelay, ...input };
+    const record = {
+      hash,
+      key: input.queryKey,
+      queryFn: input.queryFn,
+      options,
+      tags: new Set(input.tags ?? []),
+      observers: 0,
+      invalidated: true,
+      promise: null,
+      ctrl: null,
+      version: 0,
+      gcTimer: null,
+      pollTimer: null,
+      state: {
+        data: signal(input.initialData),
+        error: signal(null),
+        status: signal(input.initialData === void 0 ? "idle" : "success"),
+        fetchStatus: signal("idle"),
+        updatedAt: signal(input.initialData === void 0 ? 0 : Date.now()),
+        isStale: signal(true)
+      }
+    };
+    records.set(hash, record);
+    return record;
+  };
+  const ensure = (input) => {
+    if (!input?.queryKey) throw new TypeError("query: queryKey is required");
+    const hash = _stable(input.queryKey);
+    const record = records.get(hash) ?? createRecord(input, hash);
+    if (input.queryFn) record.queryFn = input.queryFn;
+    record.options = { ...record.options, ...input };
+    for (const tag of input.tags ?? []) record.tags.add(tag);
+    return record;
+  };
+  const fetchRecord = (record, { force = false } = {}) => {
+    if (!record.queryFn) return Promise.reject(new TypeError(`query ${record.hash} has no queryFn`));
+    if (!force && fresh(record)) return Promise.resolve(record.state.data.peek());
+    if (record.promise) return record.promise;
+    if (!_isOnline()) {
+      record.state.fetchStatus.value = "paused";
+      return Promise.reject(new Error("Query paused while offline"));
+    }
+    clearGc(record);
+    const version2 = ++record.version;
+    const ctrl = new AbortController();
+    record.ctrl = ctrl;
+    batch(() => {
+      if (record.state.data.peek() === void 0) record.state.status.value = "pending";
+      record.state.fetchStatus.value = "fetching";
+      record.state.error.value = null;
+    });
+    emit({ type: "fetch", key: record.key });
+    const run = async (left, delay) => {
+      try {
+        return await record.queryFn({ queryKey: record.key, signal: ctrl.signal, meta: record.options.meta });
+      } catch (error) {
+        if (ctrl.signal.aborted || error?.name === "AbortError" || left <= 0 || record.options.retry === false) throw error;
+        await _wait(typeof delay === "function" ? delay(left, error) : delay);
+        return run(left - 1, typeof delay === "number" ? delay * 2 : delay);
+      }
+    };
+    const promise = run(record.options.retry ?? retry, record.options.retryDelay ?? retryDelay).then((data) => {
+      if (record.version === version2 && !ctrl.signal.aborted) batch(() => {
+        record.state.data.value = record.options.structuralSharing === false ? data : _share(record.state.data.peek(), data);
+        record.state.status.value = "success";
+        record.state.fetchStatus.value = "idle";
+        record.state.updatedAt.value = Date.now();
+        record.state.isStale.value = false;
+        record.invalidated = false;
+      });
+      emit({ type: "success", key: record.key });
+      return data;
+    }).catch((error) => {
+      if (record.version === version2 && !ctrl.signal.aborted) batch(() => {
+        record.state.error.value = error;
+        record.state.status.value = record.state.data.peek() === void 0 ? "error" : "success";
+        record.state.fetchStatus.value = "idle";
+      });
+      if (!ctrl.signal.aborted) emit({ type: "error", key: record.key, error });
+      throw error;
+    }).finally(() => {
+      if (record.promise === promise) {
+        record.promise = null;
+        record.ctrl = null;
+        scheduleGc(record);
+      }
+    });
+    record.promise = promise;
+    return promise;
+  };
+  const refetchMatching = (filter) => Promise.all([...records.values()].filter((record) => _match(record, filter) && record.observers).map((record) => fetchRecord(record, { force: true }).catch(() => void 0)));
+  const client = {
+    query(input) {
+      const record = ensure(input);
+      record.observers++;
+      clearGc(record);
+      schedulePoll(record);
+      if (input.enabled !== false && (!fresh(record) || input.refetchOnMount)) fetchRecord(record).catch(() => {
+      });
+      const dispose = () => {
+        record.observers = Math.max(0, record.observers - 1);
+        scheduleGc(record);
+        schedulePoll(record);
+      };
+      return [state(record), {
+        refetch: () => fetchRecord(record, { force: true }),
+        invalidate: () => client.invalidateQueries({ queryKey: record.key, exact: true }),
+        setData: (updater) => client.setQueryData(record.key, updater),
+        cancel: () => client.cancelQueries({ queryKey: record.key, exact: true }),
+        dispose
+      }];
+    },
+    prefetchQuery(input) {
+      const record = ensure(input);
+      return fetchRecord(record);
+    },
+    fetchQuery(input) {
+      const record = ensure(input);
+      return fetchRecord(record);
+    },
+    getQueryData(key) {
+      return records.get(_stable(key))?.state.data.peek();
+    },
+    getQueryState(key) {
+      const record = records.get(_stable(key));
+      return record && state(record);
+    },
+    setQueryData(key, updater, { tags } = {}) {
+      const record = records.get(_stable(key)) ?? ensure({ queryKey: key, tags });
+      const next = typeof updater === "function" ? updater(record.state.data.peek()) : updater;
+      const data = record.options.structuralSharing === false ? next : _share(record.state.data.peek(), next);
+      batch(() => {
+        record.state.data.value = data;
+        record.state.status.value = "success";
+        record.state.error.value = null;
+        record.state.updatedAt.value = Date.now();
+        record.state.isStale.value = false;
+      });
+      record.invalidated = false;
+      for (const tag of tags ?? []) record.tags.add(tag);
+      emit({ type: "set", key: record.key });
+      if (channel) channel.postMessage({ type: "invalidate", hash: record.hash });
+      return data;
+    },
+    invalidateQueries(filter) {
+      for (const record of records.values()) if (_match(record, filter)) markStale(record);
+      emit({ type: "invalidate", filter });
+      if (channel) channel.postMessage({ type: "invalidate", filter });
+      return refetchMatching(filter);
+    },
+    cancelQueries(filter) {
+      for (const record of records.values()) if (_match(record, filter)) record.ctrl?.abort();
+    },
+    removeQueries(filter) {
+      for (const record of [...records.values()]) if (_match(record, filter)) {
+        record.ctrl?.abort();
+        clearGc(record);
+        clearPoll(record);
+        records.delete(record.hash);
+      }
+    },
+    mutate({ mutationFn, variables, optimistic, invalidate, onMutate, onSuccess, onError, networkMode = "online" } = {}) {
+      if (typeof mutationFn !== "function") return Promise.reject(new TypeError("mutate: mutationFn is required"));
+      const snapshots = [];
+      const apply = (updates) => (Array.isArray(updates) ? updates : [updates]).filter(Boolean).forEach((update) => {
+        const old = client.getQueryData(update.queryKey);
+        snapshots.push([update.queryKey, old]);
+        client.setQueryData(update.queryKey, (data) => update.updater(data));
+      });
+      const run = async () => {
+        const context = await onMutate?.(variables, { client });
+        if (optimistic) apply(typeof optimistic === "function" ? optimistic(variables) : optimistic);
+        try {
+          const data = await mutationFn(variables);
+          await onSuccess?.(data, variables, context);
+          if (invalidate) await client.invalidateQueries(invalidate);
+          emit({ type: "mutation-success" });
+          return data;
+        } catch (error) {
+          for (const [key, data] of snapshots) client.setQueryData(key, data);
+          await onError?.(error, variables, context);
+          emit({ type: "mutation-error", error });
+          throw error;
+        }
+      };
+      if (!_isOnline() && networkMode === "offlineFirst") {
+        offlineQueue.push(run);
+        emit({ type: "mutation-queued" });
+        return Promise.resolve({ queued: true });
+      }
+      return run();
+    },
+    infiniteQuery({ queryKey, queryFn, initialPageParam = 0, getNextPageParam, ...options }) {
+      const [query, controls] = client.query({ queryKey, ...options, queryFn: async (context) => ({ pages: [await queryFn({ ...context, pageParam: initialPageParam })], pageParams: [initialPageParam] }) });
+      return [query, {
+        ...controls,
+        fetchNextPage: async () => {
+          const current = query.data.peek() ?? { pages: [], pageParams: [] };
+          const pageParam = getNextPageParam?.(current.pages.at(-1), current.pages);
+          if (pageParam === void 0 || pageParam === null) return void 0;
+          const page = await queryFn({ queryKey, pageParam, signal: new AbortController().signal });
+          client.setQueryData(queryKey, { pages: [...current.pages, page], pageParams: [...current.pageParams, pageParam] });
+          return page;
+        }
+      }];
+    },
+    dehydrate({ shouldDehydrate = (record) => record.state.status.peek() === "success", version: version2 = 1 } = {}) {
+      return { version: version2, timestamp: Date.now(), queries: [...records.values()].filter(shouldDehydrate).filter((record) => _serializable(record.state.data.peek())).map((record) => ({ key: record.key, data: record.state.data.peek(), updatedAt: record.state.updatedAt.peek(), staleTime: record.options.staleTime, tags: [...record.tags] })) };
+    },
+    hydrate(snapshot, { version: version2 = 1 } = {}) {
+      if (!snapshot || snapshot.version !== version2 || !Array.isArray(snapshot.queries)) return false;
+      for (const item of snapshot.queries) {
+        const record = records.get(_stable(item.key)) ?? ensure({ queryKey: item.key, staleTime: item.staleTime, tags: item.tags });
+        batch(() => {
+          record.state.data.value = item.data;
+          record.state.status.value = "success";
+          record.state.updatedAt.value = item.updatedAt;
+          record.state.isStale.value = Date.now() - item.updatedAt >= record.options.staleTime;
+        });
+        record.invalidated = record.state.isStale.peek();
+      }
+      emit({ type: "hydrate" });
+      return true;
+    },
+    persist({ storage = typeof localStorage === "undefined" ? null : localStorage, key = "mini-react-query", version: version2 = 1 } = {}) {
+      if (!storage) throw new Error("persist: a storage adapter is required");
+      let pending = false;
+      const save = async () => {
+        const value = JSON.stringify(client.dehydrate({ version: version2 }));
+        return storage.set ? storage.set(key, value) : storage.setItem(key, value);
+      };
+      const unsubscribe = client.subscribe(() => {
+        if (!pending) {
+          pending = true;
+          queueMicrotask(() => {
+            pending = false;
+            save().catch(() => {
+            });
+          });
+        }
+      });
+      return { restore: async () => {
+        const raw = await (storage.get ? storage.get(key) : storage.getItem(key));
+        return raw ? client.hydrate(JSON.parse(raw), { version: version2 }) : false;
+      }, save, dispose: unsubscribe };
+    },
+    sync(name = "mini-react-query") {
+      if (typeof BroadcastChannel === "undefined") return () => {
+      };
+      channel?.close();
+      channel = new BroadcastChannel(name);
+      channel.onmessage = (event) => {
+        if (event.data?.type !== "invalidate") return;
+        const filter = event.data.hash ? (record) => record.hash === event.data.hash : event.data.filter;
+        for (const record of records.values()) if (_match(record, filter)) markStale(record);
+        refetchMatching(filter);
+      };
+      return () => {
+        channel?.close();
+        channel = null;
+      };
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    getDebugSnapshot() {
+      return [...records.values()].map((record) => ({ key: record.key, observers: record.observers, status: record.state.status.peek(), fetchStatus: record.state.fetchStatus.peek(), updatedAt: record.state.updatedAt.peek(), stale: record.state.isStale.peek(), tags: [...record.tags] }));
+    },
+    async fetchJSON(url, init = {}, { queryKey = ["GET", url, init.body ?? null], ...options } = {}) {
+      const hash = _stable(queryKey);
+      return client.fetchQuery({ queryKey, ...options, queryFn: async ({ signal: signal2 }) => {
+        const headers = new Headers(init.headers);
+        const prior = http.get(hash);
+        if (prior?.etag) headers.set("If-None-Match", prior.etag);
+        const response = await fetch(url, { ...init, headers, signal: signal2 });
+        if (response.status === 304 && prior) return client.getQueryData(queryKey);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const maxAge = response.headers.get("cache-control")?.match(/max-age=(\d+)/)?.[1];
+        if (maxAge) {
+          const record = records.get(hash);
+          if (record) record.options.staleTime = Number(maxAge) * 1e3;
+        }
+        http.set(hash, { etag: response.headers.get("etag") });
+        return response.json();
+      } });
+    },
+    destroy() {
+      destroyed = true;
+      for (const record of records.values()) {
+        record.ctrl?.abort();
+        clearGc(record);
+        clearPoll(record);
+      }
+      channel?.close();
+      listeners.clear();
+    }
+  };
+  const offlineQueue = [];
+  const onFocus = () => {
+    if (refetchOnWindowFocus) refetchMatching();
+  };
+  const onOnline = () => {
+    if (refetchOnReconnect) refetchMatching();
+    while (offlineQueue.length) offlineQueue.shift()().catch(() => {
+    });
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("online", onOnline);
+  }
+  const originalDestroy = client.destroy;
+  client.destroy = () => {
+    if (destroyed) return;
+    if (typeof window !== "undefined") {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("online", onOnline);
+    }
+    originalDestroy();
+  };
+  return client;
+};
+var defaultQueryClient = createQueryClient();
+var createQuery = (options) => defaultQueryClient.query(options);
+
 // src/data.js
 var createResource = (source, fetcher) => {
   if (!fetcher) {
@@ -1194,35 +1614,59 @@ var createResource = (source, fetcher) => {
     data.value = v;
   } }];
 };
-var createFetch = ({ cache = true, ttl = 3e4, retry = 2, retryDelay = 1e3, store: store2 = null } = {}) => {
+var createFetch = ({ cache = true, ttl = 3e4, retry = 2, retryDelay = 1e3, store: store2 = null, dedupe = true } = {}) => {
   const _mem = /* @__PURE__ */ new Map();
-  const cacheGet = async (key) => {
+  const _pending = /* @__PURE__ */ new Map();
+  const _versions = /* @__PURE__ */ new Map();
+  const cacheGet = (key, t) => {
     if (store2) return store2.get(key);
     const hit = _mem.get(key);
-    return hit && Date.now() - hit.ts < ttl ? hit.data : void 0;
+    return hit && Date.now() - hit.ts < t ? hit.data : void 0;
   };
   const cacheSet = async (key, data, t) => {
     if (store2) return store2.set(key, data, { ttl: t });
     _mem.set(key, { data, ts: Date.now() });
   };
-  const get = async (key, fetcher, opts = {}) => {
+  const get = (key, fetcher, opts = {}) => {
     const t = opts.ttl ?? ttl;
-    if (cache && opts.ttl !== 0) {
-      const hit = await cacheGet(key);
-      if (hit !== void 0) return hit;
+    const shouldCache = cache && opts.cache !== false && t !== 0;
+    const shouldDedupe = opts.dedupe ?? dedupe;
+    if (shouldDedupe && _pending.has(key)) return _pending.get(key);
+    const request = () => {
+      const version2 = _versions.get(key) ?? 0;
+      const attempt = (n, delay) => Promise.resolve(fetcher()).then(async (data) => {
+        if (shouldCache && (_versions.get(key) ?? 0) === version2) await cacheSet(key, data, t);
+        return data;
+      }).catch((e) => {
+        if (n > 0 && e?.name !== "AbortError") return new Promise((r) => setTimeout(r, delay)).then(() => attempt(n - 1, delay * 2));
+        throw e;
+      });
+      return attempt(opts.retry ?? retry, retryDelay);
+    };
+    const track = (promise) => {
+      if (!shouldDedupe) return promise;
+      _pending.set(key, promise);
+      promise.finally(() => {
+        if (_pending.get(key) === promise) _pending.delete(key);
+      }).catch(() => {
+      });
+      return promise;
+    };
+    if (!shouldCache) return track(request());
+    if (!store2) {
+      const hit = cacheGet(key, t);
+      return hit !== void 0 ? Promise.resolve(hit) : track(request());
     }
-    const attempt = (n, delay) => Promise.resolve(fetcher()).then(async (data) => {
-      if (cache) await cacheSet(key, data, t);
-      return data;
-    }).catch((e) => {
-      if (n > 0 && e?.name !== "AbortError") return new Promise((r) => setTimeout(r, delay)).then(() => attempt(n - 1, delay * 2));
-      throw e;
-    });
-    return attempt(opts.retry ?? retry, retryDelay);
+    return track(Promise.resolve(cacheGet(key, t)).then((hit) => hit !== void 0 ? hit : request()));
   };
   const invalidate = (key) => {
-    if (store2) return key ? store2.delete(key) : store2.clear();
-    key ? _mem.delete(key) : _mem.clear();
+    if (key !== void 0) _versions.set(key, (_versions.get(key) ?? 0) + 1);
+    else {
+      for (const k of _mem.keys()) _versions.set(k, (_versions.get(k) ?? 0) + 1);
+      for (const k of _pending.keys()) _versions.set(k, (_versions.get(k) ?? 0) + 1);
+    }
+    if (store2) return key === void 0 ? store2.clear() : store2.delete(key);
+    key === void 0 ? _mem.clear() : _mem.delete(key);
   };
   return { get, invalidate };
 };
@@ -1326,10 +1770,130 @@ var idb = (dbName, storeName = "kv") => {
     keys: () => tx("readonly", (s) => s.getAllKeys())
   };
 };
+
+// src/components.js
+var _class = (...names) => names.filter(Boolean).join(" ");
+var _signalValue = (value) => value && typeof value === "object" && "value" in value ? value.value : value;
+var Card = ({ title, children = "", className = "" } = {}) => h`
+  <section class="${_class("mr-card", className)}">${title == null ? "" : h`<h2 class="mr-card-title">${title}</h2>`}${children}</section>
+`;
+var Button = ({ label = "", variant = "primary", type = "button", disabled = false, className = "", action } = {}) => html(`<button type="${esc(type)}" class="${esc(_class("mr-btn", variant === "primary" ? "" : `mr-btn-${variant}`, className))}"${disabled ? " disabled" : ""} data-mr-action="${esc(action ?? "")}">${esc(_signalValue(label))}</button>`);
+var Badge = ({ label = "", className = "" } = {}) => h`<span class="${_class("mr-badge", className)}">${label}</span>`;
+var Alert = ({ message = "", variant = "", className = "" } = {}) => h`<div role="alert" class="${_class("mr-alert", variant && `mr-alert-${variant}`, className)}">${message}</div>`;
+var Empty = ({ message = "\u6682\u65E0\u6570\u636E", className = "" } = {}) => h`<div class="${_class("mr-empty", className)}">${message}</div>`;
+var Spinner = ({ label = "\u52A0\u8F7D\u4E2D", className = "" } = {}) => h`<span class="${_class("mr-spinner", className)}" role="status" aria-label="${label}"></span>`;
+var Input = ({ name, label, value = "", placeholder = "", type = "text", disabled = false, className = "", action } = {}) => html(`<label class="mr-field ${esc(className)}">${label == null ? "" : `<span class="mr-label">${esc(_signalValue(label))}</span>`}<input class="mr-input" name="${esc(name ?? "")}" type="${esc(type)}" value="${esc(_signalValue(value) ?? "")}" placeholder="${esc(_signalValue(placeholder))}"${disabled ? " disabled" : ""} data-mr-action="${esc(action ?? "")}"></label>`);
+var Select = ({ name, label, value = "", options = [], disabled = false, className = "", action } = {}) => {
+  const selected = String(_signalValue(value));
+  const optionHtml = options.map((option) => `<option value="${esc(option.value)}"${String(option.value) === selected ? " selected" : ""}>${esc(option.label ?? option.value)}</option>`).join("");
+  return html(`<label class="mr-field ${esc(className)}">${label == null ? "" : `<span class="mr-label">${esc(_signalValue(label))}</span>`}<select class="mr-select" name="${esc(name ?? "")}"${disabled ? " disabled" : ""} data-mr-action="${esc(action ?? "")}">${optionHtml}</select></label>`);
+};
+var Textarea = ({ name, label, value = "", placeholder = "", disabled = false, className = "", action } = {}) => html(`<label class="mr-field ${esc(className)}">${label == null ? "" : `<span class="mr-label">${esc(_signalValue(label))}</span>`}<textarea class="mr-textarea" name="${esc(name ?? "")}" placeholder="${esc(_signalValue(placeholder))}"${disabled ? " disabled" : ""} data-mr-action="${esc(action ?? "")}">${esc(_signalValue(value) ?? "")}</textarea></label>`);
+var Table = ({ rows = [], columns = [], key = (row) => row?.id ?? row?.key, caption, ariaLabel = "\u6570\u636E\u8868", empty = "\u6682\u65E0\u6570\u636E", className = "", tableClassName = "", rowClassName = "" } = {}) => {
+  const items = _signalValue(rows) ?? [];
+  const cols = columns ?? [];
+  const cell = (column, row, index) => typeof column.render === "function" ? column.render(row, index) : typeof column.value === "function" ? column.value(row, index) : row?.[column.key];
+  const header = For(cols, (column, index) => column.key ?? index, (column) => h`<th scope="col" class="${column.headerClassName ?? ""}">${column.label ?? column.key}</th>`);
+  const body = items.length ? For(items, key, (row, index) => {
+    const cells = cols.map((column) => ({ column, row, index }));
+    return h`<tr data-key="${key(row, index)}" class="${typeof rowClassName === "function" ? rowClassName(row, index) : rowClassName}">${For(cells, (item) => item.column.key, (item) => h`<td class="${item.column.className ?? ""}">${cell(item.column, item.row, item.index)}</td>`)}</tr>`;
+  }) : h`<tr class="mr-table-empty"><td colspan="${Math.max(cols.length, 1)}">${empty}</td></tr>`;
+  return h`<div class="mr-table-wrap ${className}"><table class="mr-table ${tableClassName}" aria-label="${ariaLabel}"><caption class="${caption == null ? "mr-sr-only" : ""}">${caption ?? ariaLabel}</caption><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div>`;
+};
+var _uiDebug = false;
+var _uiDebugListeners = /* @__PURE__ */ new Set();
+var setUIDebug = (enabled) => {
+  _uiDebug = Boolean(enabled);
+};
+var getUIDebugState = () => ({ enabled: _uiDebug, listeners: _uiDebugListeners.size });
+var onUIDebug = (listener) => {
+  _uiDebugListeners.add(listener);
+  return () => _uiDebugListeners.delete(listener);
+};
+var _debug = (enabled, event) => {
+  if (enabled || _uiDebug) for (const listener of _uiDebugListeners) listener(event);
+};
+var _path = (value, path) => path.split(".").reduce((current, part) => current?.[part], value);
+var _resolve = (value, values) => {
+  if (typeof value !== "string" || !value.startsWith("$")) return _signalValue(value);
+  return _signalValue(_path(values, value.slice(1)));
+};
+var _attr = (value) => esc(value ?? "");
+var _children = (children, values) => (children ?? []).map((child) => _renderNode(child, values)).join("");
+function _renderNode(node, values) {
+  if (node == null) return "";
+  if (typeof node === "string" || typeof node === "number") return esc(node);
+  const value = (name) => _resolve(node[name], values);
+  const children = () => _children(node.children, values);
+  const cls2 = _attr(value("className"));
+  switch (node.type) {
+    case "stack":
+      return `<div class="mr-stack ${cls2}">${children()}</div>`;
+    case "inline":
+      return `<div class="mr-inline ${cls2}">${children()}</div>`;
+    case "card":
+      return `<section class="mr-card ${cls2}">${node.title == null ? "" : `<h2 class="mr-card-title">${_attr(value("title"))}</h2>`}${children()}</section>`;
+    case "text":
+      return `<${node.as === "p" ? "p" : node.as === "h1" || node.as === "h2" || node.as === "h3" ? node.as : "span"} class="${cls2}">${_attr(value("text"))}</${node.as === "p" ? "p" : node.as === "h1" || node.as === "h2" || node.as === "h3" ? node.as : "span"}>`;
+    case "button":
+      return `<button type="${_attr(node.buttonType ?? "button")}" class="mr-btn ${node.variant && node.variant !== "primary" ? `mr-btn-${_attr(node.variant)}` : ""} ${cls2}" data-mr-action="${_attr(node.action)}" ${value("disabled") ? "disabled" : ""}>${_attr(value("label"))}</button>`;
+    case "input":
+      return `<label class="mr-field ${cls2}">${node.label == null ? "" : `<span class="mr-label">${_attr(value("label"))}</span>`}<input class="mr-input" name="${_attr(node.name)}" type="${_attr(node.inputType ?? "text")}" value="${_attr(value("value"))}" placeholder="${_attr(value("placeholder"))}" data-mr-action="${_attr(node.action)}" ${value("disabled") ? "disabled" : ""}></label>`;
+    case "textarea":
+      return `<label class="mr-field ${cls2}">${node.label == null ? "" : `<span class="mr-label">${_attr(value("label"))}</span>`}<textarea class="mr-textarea" name="${_attr(node.name)}" placeholder="${_attr(value("placeholder"))}" data-mr-action="${_attr(node.action)}" ${value("disabled") ? "disabled" : ""}>${_attr(value("value"))}</textarea></label>`;
+    case "badge":
+      return `<span class="mr-badge ${cls2}">${_attr(value("label"))}</span>`;
+    case "alert":
+      return `<div role="alert" class="mr-alert ${node.variant ? `mr-alert-${_attr(node.variant)}` : ""} ${cls2}">${_attr(value("message"))}</div>`;
+    case "empty":
+      return `<div class="mr-empty ${cls2}">${_attr(value("message") ?? "\u6682\u65E0\u6570\u636E")}</div>`;
+    case "spinner":
+      return `<span class="mr-spinner ${cls2}" role="status" aria-label="${_attr(value("label") ?? "\u52A0\u8F7D\u4E2D")}"></span>`;
+    case "divider":
+      return '<hr class="mr-divider">';
+    default:
+      return "";
+  }
+}
+var ui = (schema, { values = {}, actions = {}, debug = false } = {}) => ({
+  __isComponent: true,
+  html: () => {
+    _debug(debug, { type: "render" });
+    return _renderNode(schema, values);
+  },
+  setup: (root) => {
+    const dispatch = (event) => {
+      const target = event.target.closest?.("[data-mr-action]");
+      const action = target?.dataset.mrAction;
+      if (!action || !root.contains(target)) return;
+      const handler = actions[action];
+      _debug(debug, { type: "action", action, event: event.type, field: target.name || void 0 });
+      if (typeof handler === "function") handler(event, { action, name: target.name, checked: target.checked });
+    };
+    root.addEventListener("click", dispatch);
+    root.addEventListener("input", dispatch);
+    root.addEventListener("change", dispatch);
+    return () => {
+      root.removeEventListener("click", dispatch);
+      root.removeEventListener("input", dispatch);
+      root.removeEventListener("change", dispatch);
+    };
+  }
+});
 export {
   $,
   $$,
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Empty,
   For,
+  Input,
+  Select,
+  Spinner,
+  Table,
+  Textarea,
   animate,
   asyncEffect,
   attr,
@@ -1338,17 +1902,21 @@ export {
   cls,
   computed,
   createFetch,
+  createQuery,
+  createQueryClient,
   createResource,
   createRouter,
   createStore,
   debounce,
   debouncedSignal,
+  defaultQueryClient,
   defineComponent,
   delegate,
   effect,
   esc,
   flushSync,
   getSchedulerStats,
+  getUIDebugState,
   getUpdateMode,
   h,
   html,
@@ -1359,8 +1927,10 @@ export {
   nextTick,
   on,
   onCleanup,
+  onUIDebug,
   once,
   setSchedulerMaxRuns,
+  setUIDebug,
   setUpdateMode,
   show,
   signal,
@@ -1368,6 +1938,7 @@ export {
   text,
   throttle,
   transitions,
+  ui,
   version,
   virtualList,
   watch
