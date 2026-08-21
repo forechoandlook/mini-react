@@ -1,7 +1,7 @@
-/* mini-react/all v0.1.13 | https://github.com/forechoandlook/mini-react */
+/* mini-react/all v0.1.14 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
-var version = true ? "0.1.13" : "dev";
+var version = true ? "0.1.14" : "dev";
 var _eff = null;
 var _tracking = null;
 var _batchDepth = 0;
@@ -448,6 +448,8 @@ function _validateTemplateBindings(bindings, slotCount) {
         throw new TypeError(`h: dynamic ${binding.attrName} attributes are not allowed; attach events with on()/delegate.on()`);
       }
       for (const slot of binding.slots) seen.add(slot);
+    } else if (binding.kind === "flag") {
+      for (const slot of binding.slots) seen.add(slot);
     } else seen.add(binding.index);
   }
   if (seen.size !== slotCount || [...seen].some((i) => i < 0 || i >= slotCount)) {
@@ -478,7 +480,10 @@ function _recordBindings(root) {
     }
     if (node.nodeType === 1) {
       for (const a of [...node.attributes]) {
-        if (a.value.includes("@@h")) {
+        if (a.name.includes("@@h")) {
+          const slots = [...a.name.matchAll(/@@h(\d+)@@/g)].map((mm) => Number(mm[1]));
+          bindings.push({ path, kind: "flag", template: a.name, slots });
+        } else if (a.value.includes("@@h")) {
           const slots = [...a.value.matchAll(/@@h(\d+)@@/g)].map((mm) => Number(mm[1]));
           bindings.push({ path, kind: "attr", attrName: a.name, template: a.value, slots });
         }
@@ -550,6 +555,7 @@ function _renderForEntry(parent, entry, result) {
     }
     for (const b of entry.tplState.liveBindings) {
       if (b.kind === "attr") _updateAttrBinding(b, result.values);
+      else if (b.kind === "flag") _updateFlagBinding(b, result.values);
       else _updateChildBinding(b, result.values);
     }
   } else {
@@ -687,10 +693,42 @@ function _updateAttrBinding(lb, values) {
   }
   if (lb.el.getAttribute(lb.attrName) !== out) lb.el.setAttribute(lb.attrName, out);
 }
+function _flagNamesFromValue(value) {
+  if (value == null || value === false || value === true || value === "") return [];
+  return String(value).trim().split(/\s+/).filter(Boolean);
+}
+function _updateFlagBinding(lb, values) {
+  let changed = false;
+  for (const slot of lb.slots) if (lb.lastValues[slot] !== values[slot]) changed = true;
+  if (!changed) return;
+  let out = lb.template;
+  for (const slot of lb.slots) {
+    lb.lastValues[slot] = values[slot];
+    out = out.split(`@@h${slot}@@`).join(values[slot] == null ? "" : String(values[slot]));
+  }
+  const next = _flagNamesFromValue(out);
+  for (const name of next) {
+    const lower = name.toLowerCase();
+    if (lower.startsWith("on") || lower === "srcdoc") {
+      throw new TypeError(`h: dynamic ${name} attributes are not allowed; attach events with on()/delegate.on()`);
+    }
+  }
+  for (const name of lb.applied) {
+    if (!next.includes(name)) lb.el.removeAttribute(name);
+  }
+  for (const name of next) {
+    if (!lb.el.hasAttribute(name)) lb.el.setAttribute(name, "");
+  }
+  lb.applied = next;
+}
 function _instantiateBinding(root, binding) {
   const node = _resolvePath(root, binding.path);
   if (binding.kind === "attr") {
     return { kind: "attr", el: node, attrName: binding.attrName, template: binding.template, slots: binding.slots, lastValues: {} };
+  }
+  if (binding.kind === "flag") {
+    node.removeAttribute(binding.template);
+    return { kind: "flag", el: node, template: binding.template, slots: binding.slots, lastValues: {}, applied: [] };
   }
   return { kind: "child", marker: node, index: binding.index, owned: [], lastValue: void 0, lastKind: null, childStop: null };
 }
@@ -707,6 +745,7 @@ function _renderTemplateResult(el, result, prevState) {
   }
   for (const lb of state.liveBindings) {
     if (lb.kind === "attr") _updateAttrBinding(lb, result.values);
+    else if (lb.kind === "flag") _updateFlagBinding(lb, result.values);
     else _updateChildBinding(lb, result.values);
   }
   return state;

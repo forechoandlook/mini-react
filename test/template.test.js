@@ -53,6 +53,23 @@ describe('h`` compiled templates — instantiate once, patch in place', () => {
     assert.equal(textNode.data, before);
   });
 
+  it('布尔属性插值：${cond ? "disabled" : ""} 作为完整属性名写入/移除', () => {
+    const busy = signal(false);
+    const d = div();
+    mount(d, () => h`<button type="submit" ${busy.value ? 'disabled' : ''}>登录</button>`);
+    const btn = d.querySelector('button');
+    assert.equal(btn.disabled, false);
+    assert.equal(btn.hasAttribute('disabled'), false);
+
+    busy.value = true;
+    assert.equal(btn.disabled, true);
+    assert.equal(btn.hasAttribute('disabled'), true);
+
+    busy.value = false;
+    assert.equal(btn.disabled, false);
+    assert.equal(btn.hasAttribute('disabled'), false);
+  });
+
   it('属性插值：只更新变化的属性，混合静态+动态的属性值也正确拼接', () => {
     const cls = signal('a');
     const d = div();
