@@ -9,12 +9,19 @@ const _stable = value => {
   if (Array.isArray(value)) return `[${value.map(_stable).join(',')}]`;
   return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${_stable(value[key])}`).join(',')}}`;
 };
+const _keyPrefixMatch = (hash, prefix) => {
+  if (hash === prefix) return true;
+  if (prefix.startsWith('[') && prefix.endsWith(']')) {
+    return hash.startsWith(prefix.slice(0, -1) + ',');
+  }
+  return hash.startsWith(prefix);
+};
 const _match = (record, filter) => {
   if (!filter) return true;
   if (typeof filter === 'function') return filter(record);
   if (filter.queryKey) {
     const prefix = _stable(filter.queryKey);
-    if (filter.exact ? record.hash !== prefix : !record.hash.startsWith(prefix.slice(0, -1))) return false;
+    if (filter.exact ? record.hash !== prefix : !_keyPrefixMatch(record.hash, prefix)) return false;
   }
   return !filter.tags || filter.tags.some(tag => record.tags.has(tag));
 };

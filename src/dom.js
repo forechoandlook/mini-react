@@ -197,7 +197,9 @@ function _morphInto(el, htmlStr) {
 // done by scanning the static text for an unclosed `<` — a literal `<`/`>`
 // in text content (not as a tag) will confuse it. Use `&lt;`/`&gt;` there.
 const _templateCache = new WeakMap(); // strings array -> { tpl, bindings }
-const _urlAttributes = new Set(['action', 'formaction', 'href', 'src', 'xlink:href']);
+const _urlAttributes = new Set(['action', 'formaction', 'href', 'src', 'xlink:href', 'poster']);
+const _booleanAttrs = new Set(['disabled', 'checked', 'selected', 'hidden', 'readonly', 'required', 'multiple', 'autofocus', 'open', 'inert', 'controls', 'loop', 'muted', 'autoplay', 'playsinline', 'async', 'defer', 'reversed', 'ismap', 'novalidate', 'formnovalidate', 'allowfullscreen', 'default']);
+const _svgChildTag = /^(?:<!--[\s\S]*?-->|\s)*<(rect|path|g|circle|ellipse|line|polyline|polygon|text|tspan|use|defs|clippath|lineargradient|radialgradient|stop|mask|pattern|image|foreignobject|switch|symbol|marker)\b/i;
 
 function _validateTemplateBindings(bindings, slotCount) {
   const seen = new Set();
@@ -219,19 +221,40 @@ function _validateTemplateBindings(bindings, slotCount) {
 
 function _safeAttributeValue(name, value) {
   if (!_urlAttributes.has(name.toLowerCase())) return value;
-  // Remove whitespace/control characters before checking the scheme: browsers
-  // accept variants such as "java\nscript:" in URL attributes.
   const normalized = String(value).replace(/[\u0000-\u0020]/g, '').toLowerCase();
-  return normalized.startsWith('javascript:') || normalized.startsWith('vbscript:') || normalized.startsWith('data:text/html')
-    ? null : value;
+  if (normalized.startsWith('javascript:') || normalized.startsWith('vbscript:')) return null;
+  if (normalized.startsWith('data:')) {
+    return /^data:image\/(png|jpe?g|gif|webp|avif)(;|,)/.test(normalized) ? value : null;
+  }
+  return value;
 }
 
 function _classifySlotKinds(strings) {
   const kinds = [];
-  let acc = '';
-  for (let i = 0; i < strings.length - 1; i++) {
-    acc += strings[i];
-    kinds.push(acc.lastIndexOf('<') > acc.lastIndexOf('>') ? 'attr' : 'child');
+  let mode = 'text';
+  let quote = '';
+  for (let i = 0; i < strings.length; i++) {
+    const s = strings[i];
+    for (let j = 0; j < s.length; j++) {
+      const c = s[j];
+      const next = s[j + 1];
+      if (mode === 'comment') {
+        if (c === '-' && next === '-' && s[j + 2] === '>') { mode = 'text'; j += 2; }
+        continue;
+      }
+      if (quote) {
+        if (c === quote) quote = '';
+        continue;
+      }
+      if (mode === 'text') {
+        if (c === '<' && next === '!' && s[j + 2] === '-' && s[j + 3] === '-') { mode = 'comment'; j += 3; continue; }
+        if (c === '<' && (next === '/' || next === '!' || (next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z'))) mode = 'tag';
+        continue;
+      }
+      if (c === '"' || c === "'") quote = c;
+      else if (c === '>') mode = 'text';
+    }
+    if (i < strings.length - 1) kinds.push(mode === 'text' ? 'child' : 'attr');
   }
   return kinds;
 }
@@ -272,12 +295,21 @@ function _compileTemplate(strings) {
     html += strings[i + 1];
   }
   const tpl = document.createElement('template');
-  tpl.innerHTML = html;
-  const bindings = _recordBindings(tpl.content);
+  const svgWrap = _svgChildTag.test(html);
+  tpl.innerHTML = svgWrap ? `<svg xmlns="http://www.w3.org/2000/svg">${html}</svg>` : html;
+  const bindRoot = svgWrap ? tpl.content.firstElementChild : tpl.content;
+  const bindings = _recordBindings(bindRoot);
   _validateTemplateBindings(bindings, strings.length - 1);
-  compiled = { tpl, bindings };
+  compiled = { tpl, bindings, svgWrap };
   _templateCache.set(strings, compiled);
   return compiled;
+}
+
+function _materializeCompiled(compiled) {
+  const clone = compiled.tpl.content.cloneNode(true);
+  if (!compiled.svgWrap) return { root: clone, nodes: [...clone.childNodes] };
+  const svg = clone.firstElementChild;
+  return { root: svg, nodes: [...svg.childNodes] };
 }
 
 function _resolvePath(root, path) {
@@ -288,7 +320,7 @@ function _resolvePath(root, path) {
 
 function _isComponentValue(v) {
   return typeof v === 'function' || (v != null && typeof v === 'object' &&
-    (v.__isComponent || v.__isTemplateResult || v.html != null || v.setup || v.children));
+    (v.__isComponent === true || typeof v.html === 'function' || typeof v.setup === 'function'));
 }
 
 function _teardownForEntry(entry) {
@@ -301,6 +333,7 @@ function _teardownChildBinding(lb) {
   lb.childStop?.();
   lb.childStop = null;
   if (lb.forMap) { for (const entry of lb.forMap.values()) _teardownForEntry(entry); lb.forMap = null; }
+  if (lb.tplEntry) { _teardownForEntry(lb.tplEntry); lb.tplEntry = null; }
   for (const n of lb.owned) n.parentNode?.removeChild(n);
   lb.owned = [];
 }
@@ -320,14 +353,15 @@ function _renderForEntry(parent, entry, result) {
     entry.nodes = newNodes;
   };
   if (result?.__isTemplateResult) {
-    const { tpl, bindings } = _compileTemplate(result.strings);
-    if (!entry.tplState || entry.tplState.tpl !== tpl) {
-      entry.tplState?.dispose();
-      const root = tpl.content.cloneNode(true);
-      const liveBindings = bindings.map(b => _instantiateBinding(root, b));
-      swap([...root.childNodes]);
-      entry.tplState = { tpl, liveBindings, dispose: () => liveBindings.forEach(b => b.kind === 'child' && _teardownChildBinding(b)) };
-    }
+      const compiled = _compileTemplate(result.strings);
+      const { tpl, bindings } = compiled;
+      if (!entry.tplState || entry.tplState.tpl !== tpl) {
+        entry.tplState?.dispose();
+        const { root, nodes } = _materializeCompiled(compiled);
+        const liveBindings = bindings.map(b => _instantiateBinding(root, b));
+        swap(nodes);
+        entry.tplState = { tpl, liveBindings, dispose: () => liveBindings.forEach(b => b.kind === 'child' && _teardownChildBinding(b)) };
+      }
     for (const b of entry.tplState.liveBindings) {
       if (b.kind === 'attr') _updateAttrBinding(b, result.values);
       else if (b.kind === 'flag') _updateFlagBinding(b, result.values);
@@ -431,11 +465,47 @@ function _updateForBinding(lb, forVal) {
   lb.forKeys = newKeys;
 }
 
+function _arrayItemKey(item, i) {
+  if (item != null && typeof item === 'object') {
+    if (item.key != null) return item.key;
+    if (item.id != null) return item.id;
+    if (item.__isTemplateResult) {
+      const { bindings } = _compileTemplate(item.strings);
+      for (const b of bindings) {
+        if (b.kind === 'attr' && b.attrName === 'data-key' && b.slots.length === 1 && b.template === `@@h${b.slots[0]}@@`) {
+          return item.values[b.slots[0]];
+        }
+      }
+    }
+  }
+  return i;
+}
+
+function _updateNestedTemplate(lb, result) {
+  if (lb.lastKind !== 'nested-tpl') {
+    _teardownChildBinding(lb);
+    lb.tplEntry = { nodes: [], tplState: null };
+    lb.lastKind = 'nested-tpl';
+  }
+  const parent = lb.marker.parentNode;
+  _renderForEntry(parent, lb.tplEntry, result);
+  let after = lb.marker.nextSibling;
+  for (const n of lb.tplEntry.nodes) {
+    if (n !== after) parent.insertBefore(n, after);
+    after = n.nextSibling;
+  }
+}
+
 function _updateChildBinding(lb, values) {
   const value = values[lb.index];
   if (value?.__isFor) { _updateForBinding(lb, value); lb.lastValue = value; return; }
   if (Array.isArray(value)) {
-    _updateForBinding(lb, { items: value, keyFn: (_item, i) => i, render: (item) => item });
+    _updateForBinding(lb, { items: value, keyFn: _arrayItemKey, render: (item) => item });
+    lb.lastValue = value;
+    return;
+  }
+  if (value?.__isTemplateResult) {
+    _updateNestedTemplate(lb, value);
     lb.lastValue = value;
     return;
   }
@@ -486,6 +556,23 @@ function _updateAttrBinding(lb, values) {
   }
   out = _safeAttributeValue(lb.attrName, out);
   if (out == null) { lb.el.removeAttribute(lb.attrName); return; }
+  const attrName = lb.attrName.toLowerCase();
+  if (_booleanAttrs.has(attrName) && lb.slots.length === 1 && lb.template === `@@h${lb.slots[0]}@@`) {
+    const v = values[lb.slots[0]];
+    const on = !(v === false || v == null || v === '' || v === 'false' || v === 0);
+    if (!on) {
+      lb.el.removeAttribute(lb.attrName);
+      if (attrName === 'checked' && 'checked' in lb.el) lb.el.checked = false;
+      if (attrName === 'disabled' && 'disabled' in lb.el) lb.el.disabled = false;
+      if (attrName === 'selected' && 'selected' in lb.el) lb.el.selected = false;
+      return;
+    }
+    lb.el.setAttribute(lb.attrName, '');
+    if (attrName === 'checked' && 'checked' in lb.el) lb.el.checked = true;
+    if (attrName === 'disabled' && 'disabled' in lb.el) lb.el.disabled = true;
+    if (attrName === 'selected' && 'selected' in lb.el) lb.el.selected = true;
+    return;
+  }
   const tag = lb.el.tagName;
   if (lb.attrName === 'value' && (tag === 'INPUT' || tag === 'TEXTAREA')) {
     if (lb.el !== document.activeElement && lb.el.value !== out) lb.el.value = out;
@@ -538,14 +625,15 @@ function _instantiateBinding(root, binding) {
 
 /** Render an h`` TemplateResult into `el`, reusing the live instance across renders when the template shape is unchanged. */
 function _renderTemplateResult(el, result, prevState) {
-  const { tpl, bindings } = _compileTemplate(result.strings);
+  const compiled = _compileTemplate(result.strings);
+  const { tpl, bindings } = compiled;
   let state = prevState;
   if (!state || state.tpl !== tpl) {
     state?.dispose();
-    const root = tpl.content.cloneNode(true);
+    const { root, nodes } = _materializeCompiled(compiled);
     const liveBindings = bindings.map(b => _instantiateBinding(root, b));
     el.textContent = '';
-    el.appendChild(root);
+    for (const n of nodes) el.appendChild(n);
     state = { tpl, liveBindings, dispose: () => liveBindings.forEach(lb => lb.kind === 'child' && _teardownChildBinding(lb)) };
   }
   for (const lb of state.liveBindings) {

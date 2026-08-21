@@ -147,7 +147,7 @@ export const computed = fn => {
     return s._v;
   };
   const mark = () => {
-    if (dirty || disposed) return;
+    if (disposed) return;
     dirty = true;
     if (s._subs.size) recompute(true);
   };

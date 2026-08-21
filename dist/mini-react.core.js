@@ -1,7 +1,7 @@
-/* mini-react/core v0.1.15 | https://github.com/forechoandlook/mini-react */
+/* mini-react/core v0.1.16 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
-var version = true ? "0.1.15" : "dev";
+var version = true ? "0.1.16" : "dev";
 var _eff = null;
 var _tracking = null;
 var _batchDepth = 0;
@@ -128,7 +128,7 @@ var computed = (fn) => {
     return s._v;
   };
   const mark = () => {
-    if (dirty || disposed) return;
+    if (disposed) return;
     dirty = true;
     if (s._subs.size) recompute(true);
   };
