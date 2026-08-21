@@ -1,7 +1,7 @@
-/* mini-react/core v0.1.16 | https://github.com/forechoandlook/mini-react */
+/* mini-react/core v0.1.17 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
-var version = true ? "0.1.16" : "dev";
+var version = true ? "0.1.17" : "dev";
 var _eff = null;
 var _tracking = null;
 var _batchDepth = 0;

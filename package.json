@@ -1,7 +1,26 @@
 {
   "name": "mini-react",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "type": "module",
+  "types": "./mini-react.d.ts",
+  "exports": {
+    ".": {
+      "types": "./mini-react.d.ts",
+      "import": "./dist/mini-react.min.js"
+    },
+    "./dom": {
+      "types": "./mini-react.d.ts",
+      "import": "./dist/mini-react.dom.min.js"
+    },
+    "./core": {
+      "types": "./mini-react.d.ts",
+      "import": "./dist/mini-react.core.min.js"
+    },
+    "./data": {
+      "types": "./mini-react.d.ts",
+      "import": "./dist/mini-react.data.min.js"
+    }
+  },
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test test/*.test.js",

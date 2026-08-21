@@ -1,7 +1,7 @@
-/* mini-react/all v0.1.16 | https://github.com/forechoandlook/mini-react */
+/* mini-react/all v0.1.17 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
-var version = true ? "0.1.16" : "dev";
+var version = true ? "0.1.17" : "dev";
 var _eff = null;
 var _tracking = null;
 var _batchDepth = 0;
@@ -678,20 +678,50 @@ function _updateForBinding(lb, forVal) {
   }
   lb.forKeys = newKeys;
 }
+var _autoKeySeq = 0;
+var _autoKeys = /* @__PURE__ */ new WeakMap();
 function _arrayItemKey(item, i) {
   if (item != null && typeof item === "object") {
     if (item.key != null) return item.key;
     if (item.id != null) return item.id;
-    if (item.__isTemplateResult) {
-      const { bindings } = _compileTemplate(item.strings);
-      for (const b of bindings) {
-        if (b.kind === "attr" && b.attrName === "data-key" && b.slots.length === 1 && b.template === `@@h${b.slots[0]}@@`) {
-          return item.values[b.slots[0]];
+    let k = _autoKeys.get(item);
+    if (k == null) {
+      if (item.__isTemplateResult) {
+        const { bindings } = _compileTemplate(item.strings);
+        for (const b of bindings) {
+          if (b.kind === "attr" && b.attrName === "data-key" && b.slots.length === 1 && b.template === `@@h${b.slots[0]}@@`) {
+            k = item.values[b.slots[0]];
+            break;
+          }
         }
+        if (k == null) k = _templateContentKey(item);
+      } else {
+        k = "k" + (++_autoKeySeq).toString(36);
       }
+      _autoKeys.set(item, k);
+    }
+    return k;
+  }
+  return item ?? i;
+}
+function _templateContentKey(item) {
+  let out = "";
+  for (let i = 0; i < item.values.length; i++) {
+    const v = item.values[i];
+    out += "\0";
+    if (v == null || typeof v !== "object") out += String(v);
+    else if (v.__isTemplateResult) out += _templateContentKey(v);
+    else if (v.__isFor) out += "for";
+    else {
+      let id = _autoKeys.get(v);
+      if (id == null) {
+        id = "k" + (++_autoKeySeq).toString(36);
+        _autoKeys.set(v, id);
+      }
+      out += id;
     }
   }
-  return i;
+  return out;
 }
 function _updateNestedTemplate(lb, result) {
   if (lb.lastKind !== "nested-tpl") {
@@ -832,7 +862,9 @@ function _instantiateBinding(root, binding) {
     node.removeAttribute(binding.template);
     return { kind: "flag", el: node, template: binding.template, slots: binding.slots, lastValues: {}, applied: [] };
   }
-  return { kind: "child", marker: node, index: binding.index, owned: [], lastValue: void 0, lastKind: null, childStop: null };
+  const marker = document.createTextNode("");
+  node.parentNode.replaceChild(marker, node);
+  return { kind: "child", marker, index: binding.index, owned: [], lastValue: void 0, lastKind: null, childStop: null };
 }
 function _renderTemplateResult(el, result, prevState) {
   const compiled = _compileTemplate(result.strings);

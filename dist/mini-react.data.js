@@ -1,4 +1,4 @@
-/* mini-react/data v0.1.16 | https://github.com/forechoandlook/mini-react */
+/* mini-react/data v0.1.17 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
 var _eff = null;

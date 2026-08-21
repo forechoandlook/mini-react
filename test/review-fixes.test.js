@@ -67,6 +67,29 @@ describe('review fixes', () => {
     d.remove();
   });
 
+  it('array children without data-key still keep identity by content', () => {
+    const rows = signal([{ name: 'A' }, { name: 'B' }]);
+    const d = div();
+    document.body.appendChild(d);
+    mount(d, () => h`<ul>${rows.value.map((r) => h`<li><input value="${r.name}"></li>`)}</ul>`);
+    const inputA = d.querySelector('input');
+    inputA.value = 'typed-in-A';
+    rows.value = [{ name: 'Z' }, { name: 'A' }, { name: 'B' }];
+    const inputs = [...d.querySelectorAll('input')];
+    assert.equal(inputs[1], inputA);
+    assert.equal(inputs[1].value, 'typed-in-A');
+    d.remove();
+  });
+
+  it('live DOM has no compile comment anchors', () => {
+    const d = div();
+    mount(d, () => h`<p>${'hi'}<span>${1}</span></p>`);
+    assert.equal(d.innerHTML.includes('@@h'), false);
+    assert.equal(d.innerHTML.includes('<!--'), false);
+    const walker = document.createTreeWalker(d, 128);
+    assert.equal(walker.nextNode(), null);
+  });
+
   it('nested h`` inside svg keeps SVG namespace', () => {
     const d = div();
     mount(d, () => h`<svg>${h`<rect id="r" width="1" height="1" />`}</svg>`);

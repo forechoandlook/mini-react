@@ -23,6 +23,7 @@ for (const { in: entry, out } of entries) {
     platform: 'browser',
     define: { __VERSION__: `"${version}"` },
     banner: { js: banner },
+    legalComments: 'none',
   });
 
   await build({
@@ -33,7 +34,7 @@ for (const { in: entry, out } of entries) {
     format: 'esm',
     platform: 'browser',
     define: { __VERSION__: `"${version}"` },
-    banner: { js: banner },
+    legalComments: 'none',
   });
 
   const raw     = readFileSync(`${out}.js`);

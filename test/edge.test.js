@@ -244,11 +244,9 @@ describe('children key 规则', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Note: h`` keeps a small HTML comment node per interpolation as a permanent
-// anchor (same technique lit-html uses) so later renders can patch that spot
-// directly without re-parsing — so `.innerHTML` always has a few harmless
-// `<!--@@hN@@-->` markers mixed in. They don't affect textContent, layout,
-// or CSS selectors; assertions here use textContent to sidestep them.
+// h`` compile still uses HTML comments as parse-time placeholders, then
+// swaps each of them for an empty Text node in the live tree so innerHTML
+// does not expose `<!--@@hN@@-->` anchors.
 describe('h tagged template — 边界情况', () => {
   it('null/undefined 插值渲染为空字符串', () => {
     const d = div();
