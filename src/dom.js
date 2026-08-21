@@ -434,6 +434,11 @@ function _updateForBinding(lb, forVal) {
 function _updateChildBinding(lb, values) {
   const value = values[lb.index];
   if (value?.__isFor) { _updateForBinding(lb, value); lb.lastValue = value; return; }
+  if (Array.isArray(value)) {
+    _updateForBinding(lb, { items: value, keyFn: (_item, i) => i, render: (item) => item });
+    lb.lastValue = value;
+    return;
+  }
   if (Object.is(value, lb.lastValue)) return; // the actual fine-grained skip
   lb.lastValue = value;
 

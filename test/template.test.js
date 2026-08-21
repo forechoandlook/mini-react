@@ -141,6 +141,21 @@ describe('h`` compiled templates — instantiate once, patch in place', () => {
     assert.equal(d.querySelector('#pb').textContent, 'B 2');
   });
 
+  it('数组插值：.map 出来的 h`` 结果应渲染为多个子节点，而不是 [object Object]', () => {
+    const rows = signal([
+      { name: 'a', seen: '1' },
+      { name: 'b', seen: '2' },
+    ]);
+    const d = div();
+    mount(d, () => h`<ul>${rows.value.map((s) => h`<li>${s.name} ${s.seen}</li>`)}</ul>`);
+    const items = [...d.querySelectorAll('li')].map((el) => el.textContent);
+    assert.deepEqual(items, ['a 1', 'b 2']);
+    assert.equal(d.textContent.includes('[object Object]'), false);
+
+    rows.value = [{ name: 'a', seen: '1' }, { name: 'c', seen: '3' }];
+    assert.deepEqual([...d.querySelectorAll('li')].map((el) => el.textContent), ['a 1', 'c 3']);
+  });
+
   it('html() 受信任内容作为插值：原样插入，不转义', () => {
     const html = (s) => ({ __trusted: true, value: String(s) });
     const raw = signal('<b>bold</b>');

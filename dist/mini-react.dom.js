@@ -1,4 +1,4 @@
-/* mini-react/dom v0.1.14 | https://github.com/forechoandlook/mini-react */
+/* mini-react/dom v0.1.15 | https://github.com/forechoandlook/mini-react */
 
 // src/core.js
 var _eff = null;
@@ -628,6 +628,11 @@ function _updateChildBinding(lb, values) {
   const value = values[lb.index];
   if (value?.__isFor) {
     _updateForBinding(lb, value);
+    lb.lastValue = value;
+    return;
+  }
+  if (Array.isArray(value)) {
+    _updateForBinding(lb, { items: value, keyFn: (_item, i) => i, render: (item) => item });
     lb.lastValue = value;
     return;
   }
