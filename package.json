@@ -1,6 +1,6 @@
 {
   "name": "mini-react",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "type": "module",
   "types": "./mini-react.d.ts",
   "exports": {
@@ -19,6 +19,14 @@
     "./data": {
       "types": "./mini-react.d.ts",
       "import": "./dist/mini-react.data.min.js"
+    },
+    "./query": {
+      "types": "./mini-react.d.ts",
+      "import": "./dist/mini-react.query.min.js"
+    },
+    "./components": {
+      "types": "./mini-react.d.ts",
+      "import": "./dist/mini-react.components.min.js"
     }
   },
   "scripts": {

@@ -6,7 +6,7 @@
 
 ```js
 import { signal, mount, h, For } from
-  'https://cdn.jsdelivr.net/gh/forechoandlook/mini-react@latest/dist/mini-react.min.js';
+  'https://cdn.jsdelivr.net/gh/forechoandlook/mini-react@main/dist/mini-react.dom.min.js';
 
 const count = signal(0);
 mount(document.querySelector('#app'), () => h`
@@ -34,10 +34,12 @@ count.value += 1; // DOM is updated synchronously
 
 | File | Purpose |
 | --- | --- |
-| `dist/mini-react.min.js` | Full browser ESM bundle |
+| `dist/mini-react.min.js` | Thin re-export of the packages below (loads them as separate modules) |
 | `dist/mini-react.core.min.js` | Signals and reactive primitives |
-| `dist/mini-react.dom.min.js` | DOM rendering and UI helpers |
-| `dist/mini-react.data.min.js` | Data fetching and browser storage |
+| `dist/mini-react.dom.min.js` | DOM rendering (`mount`, `h`, `For`, …) plus core re-exports |
+| `dist/mini-react.query.min.js` | Query client |
+| `dist/mini-react.data.min.js` | `createResource` / storage (imports core + query) |
+| `dist/mini-react.components.min.js` | Optional UI primitives (imports core + dom) |
 | `dist/mini-react.min.css` | Optional scoped UI primitives |
 
 ## Optional CSS
@@ -47,7 +49,7 @@ API is composable utilities (`mr-flex`, `mr-gap-2`, `mr-p-4`, `mr-bg-soft`, ...)
 plus optional ready-made card/button/form classes.
 
 ```html
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/forechoandlook/mini-react@latest/dist/mini-react.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/forechoandlook/mini-react@main/dist/mini-react.min.css">
 <main class="mr-root mr-auto-dark mr-min-h-screen mr-bg-soft mr-p-4">
   <section class="mr-flex mr-flex-col mr-gap-3 mr-p-4 mr-bg-base mr-border mr-rounded-md mr-shadow">
     <label class="mr-flex mr-flex-col mr-gap-1 mr-font-semibold">Name <input class="mr-input"></label>

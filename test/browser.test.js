@@ -38,7 +38,16 @@ const pageHtml = `<!doctype html>
 before(async () => {
   server = createServer(async (req, res) => {
     if (req.url === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(pageHtml); return; }
-    if (req.url === '/dist/mini-react.min.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }); res.end(await readFile(new URL('../dist/mini-react.min.js', import.meta.url))); return; }
+    const dist = req.url.match(/^\/dist\/(mini-react[\w.]*\.js)$/);
+    if (dist) {
+      try {
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
+        res.end(await readFile(new URL(`../dist/${dist[1]}`, import.meta.url)));
+        return;
+      } catch {
+        res.writeHead(404); res.end('not found'); return;
+      }
+    }
     res.writeHead(404); res.end('not found');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

@@ -1,300 +1,9 @@
-/* mini-react/dom v0.1.17 | https://github.com/forechoandlook/mini-react */
-
-// src/core.js
-var _eff = null;
-var _tracking = null;
-var _batchDepth = 0;
-var _currCleanups = null;
-var _pendingComputed = /* @__PURE__ */ new Set();
-var _pendingEffects = /* @__PURE__ */ new Set();
-var _isFlushing = false;
-var _maxFlushRuns = 1e4;
-var _schedulerStats = { flushes: 0, runs: 0, lastFlushRuns: 0 };
-var setSchedulerMaxRuns = (n) => {
-  if (!Number.isInteger(n) || n < 1) throw new TypeError("setSchedulerMaxRuns: expected a positive integer");
-  _maxFlushRuns = n;
-};
-var getSchedulerStats = () => ({ ..._schedulerStats, maxRuns: _maxFlushRuns });
-var _mode = "sync";
-var _microtaskFlushScheduled = false;
-var setUpdateMode = (mode) => {
-  if (mode !== "sync" && mode !== "microtask") throw new TypeError(`setUpdateMode: expected 'sync' or 'microtask', got ${mode}`);
-  _mode = mode;
-};
-var getUpdateMode = () => _mode;
-function _scheduleMicrotaskFlush() {
-  if (_microtaskFlushScheduled) return;
-  _microtaskFlushScheduled = true;
-  queueMicrotask(() => {
-    _microtaskFlushScheduled = false;
-    flushSync();
-  });
-}
-var flushSync = () => {
-  if (_isFlushing) return;
-  _isFlushing = true;
-  let runs = 0;
-  _schedulerStats.flushes++;
-  try {
-    while (_pendingComputed.size || _pendingEffects.size) {
-      while (_pendingComputed.size) {
-        const f = _pendingComputed.values().next().value;
-        _pendingComputed.delete(f);
-        if (++runs > _maxFlushRuns) throw new Error(`mini-react: reactive update loop exceeded ${_maxFlushRuns} runs`);
-        f();
-      }
-      if (_pendingEffects.size) {
-        const f = _pendingEffects.values().next().value;
-        _pendingEffects.delete(f);
-        if (++runs > _maxFlushRuns) throw new Error(`mini-react: reactive update loop exceeded ${_maxFlushRuns} runs`);
-        f();
-      }
-    }
-  } finally {
-    _schedulerStats.runs += runs;
-    _schedulerStats.lastFlushRuns = runs;
-    if (runs > _maxFlushRuns) {
-      _pendingComputed.clear();
-      _pendingEffects.clear();
-    }
-    _isFlushing = false;
-  }
-};
-function _notify(subs) {
-  for (const f of subs) (f._isComputed ? _pendingComputed : _pendingEffects).add(f);
-  if (_batchDepth > 0 || _isFlushing) return;
-  if (_mode === "microtask") _scheduleMicrotaskFlush();
-  else flushSync();
-}
-var Signal = class {
-  constructor(v, eq) {
-    this._v = v;
-    this._subs = /* @__PURE__ */ new Set();
-    this._eq = eq ?? ((a, b) => a === b);
-  }
-  get value() {
-    if (_eff) {
-      this._subs.add(_eff);
-      _tracking?.add(this);
-    }
-    return this._v;
-  }
-  set value(v) {
-    if (this._eq(v, this._v)) return;
-    this._v = v;
-    _notify(this._subs);
-  }
-  peek() {
-    return this._v;
-  }
-};
-var signal = (v, { equals } = {}) => new Signal(v, equals);
-function _run(fn, runner, deps, cleanups) {
-  const prevDeps = new Set(deps);
-  for (const d of deps) d._subs.delete(runner);
-  deps.clear();
-  cleanups?.forEach((f) => f?.());
-  cleanups?.splice(0);
-  const prev = [_eff, _tracking, _currCleanups];
-  [_eff, _tracking, _currCleanups] = [runner, deps, cleanups];
-  try {
-    return fn();
-  } catch (e) {
-    for (const d of prevDeps) {
-      d._subs.add(runner);
-      deps.add(d);
-    }
-    throw e;
-  } finally {
-    [_eff, _tracking, _currCleanups] = prev;
-  }
-}
-var computed = (fn) => {
-  const s = new Signal(void 0), deps = /* @__PURE__ */ new Set();
-  let dirty = true, disposed = false;
-  const recompute = (notify) => {
-    if (!dirty || disposed) return s._v;
-    dirty = false;
-    try {
-      const v = _run(fn, mark, deps, null);
-      const changed = v !== s._v;
-      if (changed) s._v = v;
-      if (changed && notify) _notify(s._subs);
-    } catch (e) {
-      dirty = true;
-      console.error("[computed]", e);
-    }
-    return s._v;
-  };
-  const mark = () => {
-    if (disposed) return;
-    dirty = true;
-    if (s._subs.size) recompute(true);
-  };
-  mark._isComputed = true;
-  const read = () => {
-    return recompute(false);
-  };
-  Object.defineProperty(s, "value", {
-    get() {
-      if (_eff) {
-        s._subs.add(_eff);
-        _tracking?.add(s);
-      }
-      return read();
-    },
-    set() {
-      throw new TypeError("Cannot assign to a computed signal");
-    }
-  });
-  s.dispose = () => {
-    if (disposed) return;
-    disposed = true;
-    for (const d of deps) d._subs.delete(mark);
-    deps.clear();
-  };
-  return s;
-};
-var effect = (fn) => {
-  const deps = /* @__PURE__ */ new Set(), cleanups = [];
-  const run = () => {
-    try {
-      const ret = _run(fn, run, deps, cleanups);
-      if (typeof ret === "function") cleanups.push(ret);
-    } catch (e) {
-      console.error("[effect]", e);
-    }
-  };
-  run();
-  return () => {
-    for (const d of deps) d._subs.delete(run);
-    deps.clear();
-    cleanups.forEach((f) => f?.());
-    cleanups.splice(0);
-  };
-};
-var batch = (fn) => {
-  _batchDepth++;
-  try {
-    fn();
-  } finally {
-    if (--_batchDepth === 0) {
-      flushSync();
-    }
-  }
-};
-var watch = (sig, cb) => {
-  let old = sig.peek(), mounted = false;
-  return effect(() => {
-    const v = sig.value;
-    if (mounted) {
-      cb(v, old);
-    }
-    mounted = true;
-    old = v;
-  });
-};
-var onCleanup = (fn) => {
-  if (_currCleanups) _currCleanups.push(fn);
-};
-var _idxRe = /^\d+$/;
-var _structuralMethods = ["push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill", "copyWithin"];
-function _wrapRow(arr, index, rowCache) {
-  let entry = rowCache.get(index);
-  if (entry) return entry.proxy;
-  const fields = /* @__PURE__ */ new Map();
-  const fieldSignal = (prop) => {
-    let s = fields.get(prop);
-    if (!s) {
-      s = new Signal(arr[index]?.[prop]);
-      fields.set(prop, s);
-    }
-    return s;
-  };
-  const proxy = new Proxy({}, {
-    get(_, prop) {
-      if (typeof prop === "symbol") return arr[index]?.[prop];
-      return fieldSignal(prop).value;
-    },
-    set(_, prop, value) {
-      const target = arr[index];
-      if (target) target[prop] = value;
-      fieldSignal(prop).value = value;
-      return true;
-    },
-    has(_, prop) {
-      return arr[index] != null && prop in arr[index];
-    },
-    ownKeys() {
-      return arr[index] ? Reflect.ownKeys(arr[index]) : [];
-    },
-    getOwnPropertyDescriptor(_, prop) {
-      const target = arr[index];
-      if (!target || !(prop in target)) return void 0;
-      return { enumerable: true, configurable: true, value: fieldSignal(prop).value };
-    }
-  });
-  rowCache.set(index, { proxy });
-  return proxy;
-}
-var store = (initial) => {
-  if (!Array.isArray(initial)) throw new TypeError("store() currently only supports arrays");
-  const arr = initial;
-  const structural = new Signal(0, () => false);
-  const rowCache = /* @__PURE__ */ new Map();
-  const bump = () => {
-    structural.value = structural._v + 1;
-  };
-  return new Proxy(arr, {
-    get(target, prop, receiver) {
-      if (prop === "length") {
-        structural.value;
-        return target.length;
-      }
-      if (typeof prop === "string" && _idxRe.test(prop)) {
-        structural.value;
-        const idx = Number(prop);
-        return idx < target.length ? _wrapRow(target, idx, rowCache) : void 0;
-      }
-      if (prop === Symbol.iterator) {
-        return function* () {
-          structural.value;
-          for (let i = 0; i < target.length; i++) yield _wrapRow(target, i, rowCache);
-        };
-      }
-      if (_structuralMethods.includes(prop)) {
-        return (...args) => {
-          rowCache.clear();
-          const res = Array.prototype[prop].apply(target, args);
-          bump();
-          return res;
-        };
-      }
-      return Reflect.get(target, prop, receiver);
-    },
-    set(target, prop, value) {
-      if (typeof prop === "string" && _idxRe.test(prop)) {
-        target[Number(prop)] = value;
-        rowCache.delete(Number(prop));
-        bump();
-        return true;
-      }
-      if (prop === "length") {
-        target.length = value;
-        rowCache.clear();
-        bump();
-        return true;
-      }
-      return Reflect.set(target, prop, value);
-    }
-  });
-};
-var _escMap = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
-var esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => _escMap[c]);
-var html = (s) => ({ __trusted: true, value: String(s ?? "") });
+/* mini-react/dom v0.1.18 | https://github.com/forechoandlook/mini-react */
 
 // src/dom.js
-var text = (sig) => ({ __bind: "text", sig, render: (el) => el.textContent = esc(sig.value) });
+import { signal, computed, effect, batch, watch, onCleanup, esc, html, store, setUpdateMode, getUpdateMode, flushSync, setSchedulerMaxRuns, getSchedulerStats } from "./mini-react.core.js";
+import { signal as signal2, computed as computed2, effect as effect2, batch as batch2, esc as esc2 } from "./mini-react.core.js";
+var text = (sig) => ({ __bind: "text", sig, render: (el) => el.textContent = esc2(sig.value) });
 var cls = (mapSig) => ({ __bind: "class", sig: mapSig, render: (el) => el.className = Object.entries(mapSig.value).filter(([, v]) => v).map(([k]) => k).join(" ") });
 var attr = (name, sig) => ({ __bind: "attr", name, sig, render: (el) => el.setAttribute(name, sig.value) });
 function _focusPath(root, node) {
@@ -646,11 +355,11 @@ function _updateForBinding(lb, forVal) {
     usedKeys.add(key);
     let entry = map.get(key);
     if (!entry) {
-      entry = { nodes: [], tplState: null, itemSig: signal(item), indexSig: signal(i), rowStop: null };
-      entry.rowStop = effect(() => _renderForEntry(parent, entry, render(entry.itemSig.value, entry.indexSig.value)));
+      entry = { nodes: [], tplState: null, itemSig: signal2(item), indexSig: signal2(i), rowStop: null };
+      entry.rowStop = effect2(() => _renderForEntry(parent, entry, render(entry.itemSig.value, entry.indexSig.value)));
       map.set(key, entry);
     } else {
-      batch(() => {
+      batch2(() => {
         entry.indexSig.value = i;
         entry.itemSig.value = item;
       });
@@ -885,7 +594,7 @@ var mount = (el, component, { escape = true } = {}) => {
     _tplState?.dispose();
     _tplState = null;
   };
-  const stop = effect(() => {
+  const stop = effect2(() => {
     try {
       const restoreFocus = _captureFocus(el);
       _childrenStop?.();
@@ -962,7 +671,7 @@ var show = (cond, yes, no = "") => () => {
   return typeof branch === "function" ? branch() : branch;
 };
 var bind = (el, sig) => {
-  const stop = effect(() => {
+  const stop = effect2(() => {
     el.value = sig.value ?? "";
   });
   const onInput = () => {
@@ -980,7 +689,7 @@ var delegate = /* @__PURE__ */ (() => {
     if (reg.has(evt)) return;
     reg.set(evt, []);
     document.addEventListener(evt, (e) => {
-      batch(() => {
+      batch2(() => {
         for (const [sel, fn] of reg.get(evt)) {
           const t = e.target.closest(sel);
           if (t) fn(e, t);
@@ -1022,11 +731,11 @@ var keyedList = (itemsSig, renderItem, getKey = (i) => i.id ?? i.key, { escape =
       const el = entry.el;
       if (raw?.__isTemplateResult) el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
       else {
-        const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
+        const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc2(raw) : raw?.value ?? raw;
         if (el.innerHTML !== h2) el.innerHTML = h2;
       }
     };
-    const stop = effect(() => {
+    const stop = effect2(() => {
       try {
         const items = itemsSig.value;
         const keys = new Array(items.length), live = /* @__PURE__ */ new Set();
@@ -1049,13 +758,13 @@ var keyedList = (itemsSig, renderItem, getKey = (i) => i.id ?? i.key, { escape =
           if (!entry) {
             const el2 = document.createElement(tag);
             el2.dataset.key = key;
-            entry = { el: el2, item: signal(item), index: signal(i), stop: null };
-            entry.stop = effect(() => renderEntry(entry));
+            entry = { el: el2, item: signal2(item), index: signal2(i), stop: null };
+            entry.stop = effect2(() => renderEntry(entry));
             domMap.set(key, entry);
             parentEl.appendChild(el2);
             transitions.slideDown(el2);
           } else {
-            batch(() => {
+            batch2(() => {
               entry.item.value = item;
               entry.index.value = i;
             });
@@ -1095,7 +804,7 @@ var virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5, { escape
     const el = entry.el;
     if (raw?.__isTemplateResult) el.__tplState = _renderTemplateResult(el, raw, el.__tplState);
     else {
-      const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc(raw) : raw?.value ?? raw;
+      const h2 = escape && typeof raw === "string" && !raw?.__trusted ? esc2(raw) : raw?.value ?? raw;
       if (el.innerHTML !== h2) el.innerHTML = h2;
     }
   };
@@ -1111,12 +820,12 @@ var virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5, { escape
       if (!entry) {
         const el = document.createElement("div");
         Object.assign(el.style, { position: "absolute", top: `${i * itemHeight}px`, height: `${itemHeight}px`, width: "100%" });
-        entry = { el, item: signal(item), index: signal(i), stop: null };
-        entry.stop = effect(() => renderRow(entry));
+        entry = { el, item: signal2(item), index: signal2(i), stop: null };
+        entry.stop = effect2(() => renderRow(entry));
         inner.appendChild(el);
         rendered.set(key, entry);
       } else {
-        batch(() => {
+        batch2(() => {
           entry.item.value = item;
           entry.index.value = i;
         });
@@ -1131,7 +840,7 @@ var virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5, { escape
   };
   const onScroll = () => update(false);
   wrap.addEventListener("scroll", onScroll, { passive: true });
-  const stopEffect = effect(() => update(true));
+  const stopEffect = effect2(() => update(true));
   return {
     el: wrap,
     dispose: () => {
@@ -1143,7 +852,7 @@ var virtualList = (itemsSig, renderItem, itemHeight = 50, overscan = 5, { escape
   };
 };
 var createRouter = (routes, { keepAlive = false } = {}) => {
-  const current = signal(location.hash.slice(1) || "/");
+  const current = signal2(location.hash.slice(1) || "/");
   let disposed = false;
   const onHashChange = () => {
     current.value = location.hash.slice(1) || "/";
@@ -1157,8 +866,8 @@ var createRouter = (routes, { keepAlive = false } = {}) => {
     cache.set(key, inst);
     return inst;
   };
-  const route = signal(void 0);
-  const stopRoute = effect(() => {
+  const route = signal2(void 0);
+  const stopRoute = effect2(() => {
     const path = current.value;
     for (const [pat, comp] of Object.entries(routes)) {
       if (pat === "*") continue;
@@ -1231,15 +940,15 @@ var defineComponent = (setup, { name } = {}) => {
     if (_cache && _shallowEqualProps(_cache.props, props)) return _cache.instance;
     const stops = [], mountCbs = [], unmountCbs = [];
     const ctx = {
-      signal: (v, opts) => signal(v, opts),
-      computed: (fn) => computed(fn),
+      signal: (v, opts) => signal2(v, opts),
+      computed: (fn) => computed2(fn),
       effect: (fn) => {
-        const s = effect(fn);
+        const s = effect2(fn);
         stops.push(s);
         return s;
       },
       asyncEffect: (fn) => {
-        const s = effect(() => {
+        const s = effect2(() => {
           const ctrl = new AbortController();
           Promise.resolve(fn(ctrl.signal)).catch((e) => {
             if (e?.name !== "AbortError") console.error("[asyncEffect]", e);
@@ -1309,11 +1018,11 @@ var throttle = (fn, ms) => {
   return d;
 };
 var debouncedSignal = (src, ms) => {
-  const out = signal(src.peek());
+  const out = signal2(src.peek());
   const flush = debounce((v) => {
     out.value = v;
   }, ms);
-  effect(() => {
+  effect2(() => {
     const v = src.value;
     flush(v);
   });

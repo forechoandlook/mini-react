@@ -9,7 +9,7 @@ import { signal, effect, computed, batch, watch, asyncEffect,
          delegate, keyedList, virtualList, createRouter,
          setUpdateMode, getUpdateMode, flushSync,
          $, $$, on, once, nextTick, debounce, throttle, debouncedSignal,
-         esc, html } from 'https://cdn.jsdelivr.net/gh/forechoandlook/mini-react@latest/dist/mini-react.min.js';
+         esc, html } from 'https://cdn.jsdelivr.net/gh/forechoandlook/mini-react@main/dist/mini-react.min.js';
 ```
 - `signal(v)` — 创建响应式值，`.value` 读写（追踪依赖），`.peek()` 读但不追踪
 - `computed(() => expr)` — 派生值，自动追踪依赖，只读
